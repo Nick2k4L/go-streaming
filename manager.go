@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	go_i2cp "github.com/go-i2p/go-i2cp"
 	"github.com/rs/zerolog/log"
@@ -80,7 +79,7 @@ func NewStreamManager(client *go_i2cp.Client) (*StreamManager, error) {
 	sm := &StreamManager{
 		client:          client,
 		incomingPackets: make(chan *incomingPacket, 100),
-		sessionReady:    make(chan struct{}),
+		sessionReady:    make(chan struct{}, 1), // Buffered: prevents race if callback fires before select
 		processorCtx:    ctx,
 		processorCancel: cancel,
 	}
@@ -126,8 +125,6 @@ func (sm *StreamManager) StartSession(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("session creation timeout: %w", ctx.Err())
-	case <-time.After(30 * time.Second):
-		return fmt.Errorf("session creation timeout")
 	}
 }
 

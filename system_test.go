@@ -155,6 +155,12 @@ func TestSystem_BasicConnectivity(t *testing.T) {
 	}
 	defer client.Close()
 
+	ctx, cancel := context.WithTimeout(context.Background(), getTestTimeout())
+	defer cancel()
+
+	// Start ProcessIO BEFORE creating session - required for I2CP callbacks
+	startProcessIO(t, client, ctx)
+
 	// Create manager and start session
 	manager := createTestManager(t, client)
 	defer manager.Close()
