@@ -78,12 +78,12 @@ func checkRouterAvailable(t *testing.T) bool {
 
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
-		t.Logf("I2P router not available: %v", err)
+		t.Logf("I2P router not reachable at %s: %v\nEnsure I2P router is running and I2CP is enabled on port 7654", addr, err)
 		return false
 	}
 	conn.Close()
 
-	t.Logf("I2P router is reachable at %s", addr)
+	t.Logf("I2P router is reachable at %s (TCP connection successful)", addr)
 	return true
 }
 
@@ -91,7 +91,7 @@ func checkRouterAvailable(t *testing.T) bool {
 // Returns nil and skips test if router is unavailable.
 func createTestClient(t *testing.T) *go_i2cp.Client {
 	if !checkRouterAvailable(t) {
-		t.Skip("I2P router not available - skipping system test")
+		t.Skip("I2P router not available - skipping system test\nStart an I2P router (i2pd or Java I2P) with I2CP enabled")
 		return nil
 	}
 
@@ -102,13 +102,17 @@ func createTestClient(t *testing.T) *go_i2cp.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	t.Log("Connecting to I2P router...")
+	t.Log("Connecting to I2P router via I2CP protocol...")
 	if err := client.Connect(ctx); err != nil {
-		t.Skipf("Failed to connect to I2P router: %v", err)
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Skipf("I2CP connection timed out - router may be unresponsive\nCheck router status and logs")
+		} else {
+			t.Skipf("Failed to connect to I2P router: %v\nVerify I2CP protocol is enabled", err)
+		}
 		return nil
 	}
 
-	t.Log("Successfully connected to I2P router")
+	t.Log("Successfully connected to I2P router via I2CP")
 	return client
 } // createTestManager creates a StreamManager with active session.
 // Returns nil and skips test if I2CP session creation fails (router not fully functional).
@@ -124,17 +128,22 @@ func createTestManager(t *testing.T, client *go_i2cp.Client) *StreamManager {
 
 	err = manager.StartSession(ctx)
 	if err != nil {
-		t.Skipf("Failed to start I2CP session (router may not be fully initialized): %v", err)
+		// Provide detailed troubleshooting guidance based on error type
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Skipf("I2CP session creation timed out - router may be starting up or overloaded. Try again in a few minutes.")
+		} else {
+			t.Skipf("Failed to start I2CP session (router may not be fully initialized): %v\n\nTroubleshooting:\n  - Wait 2-5 minutes after router startup for full initialization\n  - Check router logs for errors\n  - Verify I2CP is enabled on port 7654\n  - Ensure router has established network connections", err)
+		}
 		return nil
 	}
 
 	dest := manager.Destination()
 	if dest == nil {
-		t.Skip("Session destination is nil - router not ready")
+		t.Skip("Session destination is nil - router not ready. Wait for router to fully initialize.")
 		return nil
 	}
 
-	t.Logf("I2CP session created with destination")
+	t.Logf("I2CP session created successfully")
 	return manager
 }
 
