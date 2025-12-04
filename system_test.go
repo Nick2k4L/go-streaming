@@ -88,10 +88,10 @@ func checkRouterAvailable(t *testing.T) bool {
 }
 
 // createTestClient creates and connects an I2CP client.
-// Returns nil and skips test if router is unavailable.
+// Fails test if router is unavailable.
 func createTestClient(t *testing.T) *go_i2cp.Client {
 	if !checkRouterAvailable(t) {
-		t.Skip("I2P router not available - skipping system test\nStart an I2P router (i2pd or Java I2P) with I2CP enabled")
+		require.Fail(t, "I2P router not available - cannot run system test.\nStart an I2P router (i2pd or Java I2P) with I2CP enabled on port 7654.")
 		return nil
 	}
 
@@ -105,9 +105,9 @@ func createTestClient(t *testing.T) *go_i2cp.Client {
 	t.Log("Connecting to I2P router via I2CP protocol...")
 	if err := client.Connect(ctx); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			t.Skipf("I2CP connection timed out - router may be unresponsive\nCheck router status and logs")
+			require.NoError(t, err, "I2CP connection timed out - router may be unresponsive.\nCheck router status and logs.")
 		} else {
-			t.Skipf("Failed to connect to I2P router: %v\nVerify I2CP protocol is enabled", err)
+			require.NoError(t, err, "Failed to connect to I2P router.\nVerify I2CP protocol is enabled on port 7654.")
 		}
 		return nil
 	}
@@ -115,7 +115,7 @@ func createTestClient(t *testing.T) *go_i2cp.Client {
 	t.Log("Successfully connected to I2P router via I2CP")
 	return client
 } // createTestManager creates a StreamManager with active session.
-// Returns nil and skips test if I2CP session creation fails (router not fully functional).
+// Fails test if I2CP session creation fails (router not fully functional).
 func createTestManager(t *testing.T, client *go_i2cp.Client) *StreamManager {
 	manager, err := NewStreamManager(client)
 	require.NoError(t, err, "Failed to create stream manager")
@@ -130,18 +130,15 @@ func createTestManager(t *testing.T, client *go_i2cp.Client) *StreamManager {
 	if err != nil {
 		// Provide detailed troubleshooting guidance based on error type
 		if ctx.Err() == context.DeadlineExceeded {
-			t.Skipf("I2CP session creation timed out - router may be starting up or overloaded. Try again in a few minutes.")
+			require.NoError(t, err, "I2CP session creation timed out - router may be starting up or overloaded. Wait for router to fully initialize (2-5 minutes after startup), then retry.")
 		} else {
-			t.Skipf("Failed to start I2CP session (router may not be fully initialized): %v\n\nTroubleshooting:\n  - Wait 2-5 minutes after router startup for full initialization\n  - Check router logs for errors\n  - Verify I2CP is enabled on port 7654\n  - Ensure router has established network connections", err)
+			require.NoError(t, err, "Failed to start I2CP session (router may not be fully initialized).\n\nTroubleshooting:\n  - Wait 2-5 minutes after router startup for full initialization\n  - Check router logs for errors\n  - Verify I2CP is enabled on port 7654\n  - Ensure router has established network connections")
 		}
 		return nil
 	}
 
 	dest := manager.Destination()
-	if dest == nil {
-		t.Skip("Session destination is nil - router not ready. Wait for router to fully initialize.")
-		return nil
-	}
+	require.NotNil(t, dest, "Session destination is nil - router not ready. Wait for router to fully initialize.")
 
 	t.Logf("I2CP session created successfully")
 	return manager
@@ -176,18 +173,12 @@ func startProcessIO(t *testing.T, client *go_i2cp.Client, ctx context.Context) {
 // TestSystem_BasicConnectivity verifies basic I2CP connectivity.
 func TestSystem_BasicConnectivity(t *testing.T) {
 	client := createTestClient(t)
-	if client == nil {
-		return // Skipped
-	}
 	defer client.Close()
 
 	// Create manager and start session WITHOUT ProcessIO running first
 	// NOTE: This seems wrong per I2CP protocol, but matches working example pattern
 	// See GO-I2CP-BUG-REPORT.md for details on go-i2cp issues
 	manager := createTestManager(t, client)
-	if manager == nil {
-		return // Skipped
-	}
 	defer manager.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), getTestTimeout())
@@ -215,9 +206,6 @@ func TestSystem_SessionLifecycle(t *testing.T) {
 		t.Logf("Creating session %d", i+1)
 
 		client := createTestClient(t)
-		if client == nil {
-			return // Skipped
-		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), getTestTimeout())
 
@@ -226,11 +214,6 @@ func TestSystem_SessionLifecycle(t *testing.T) {
 
 		// Create manager and start session
 		manager := createTestManager(t, client)
-		if manager == nil {
-			cancel()
-			client.Close()
-			return // Skipped
-		}
 
 		t.Logf("Created session %d successfully", i+1)
 
@@ -248,9 +231,6 @@ func TestSystem_SessionLifecycle(t *testing.T) {
 // TestSystem_ListenerCreation tests creating a streaming listener.
 func TestSystem_ListenerCreation(t *testing.T) {
 	client := createTestClient(t)
-	if client == nil {
-		return
-	}
 	defer client.Close()
 
 	manager := createTestManager(t, client)
@@ -280,15 +260,9 @@ func TestSystem_ListenerCreation(t *testing.T) {
 func TestSystem_EchoServerClient(t *testing.T) {
 	// Create server
 	serverClient := createTestClient(t)
-	if serverClient == nil {
-		return
-	}
 	defer serverClient.Close()
 
 	serverManager := createTestManager(t, serverClient)
-	if serverManager == nil {
-		return // Skipped
-	}
 	defer serverManager.Close()
 
 	serverCtx, serverCancel := context.WithTimeout(context.Background(), getTestTimeout())
@@ -348,13 +322,9 @@ func TestSystem_EchoServerClient(t *testing.T) {
 
 	// Create client
 	clientClient := createTestClient(t)
-	require.NotNil(t, clientClient)
 	defer clientClient.Close()
 
 	clientManager := createTestManager(t, clientClient)
-	if clientManager == nil {
-		return // Skipped
-	}
 	defer clientManager.Close()
 
 	clientCtx, clientCancel := context.WithTimeout(context.Background(), getTestTimeout())
@@ -468,13 +438,9 @@ func TestSystem_LargeDataTransfer(t *testing.T) {
 
 	// Create client
 	clientClient := createTestClient(t)
-	require.NotNil(t, clientClient)
 	defer clientClient.Close()
 
 	clientManager := createTestManager(t, clientClient)
-	if clientManager == nil {
-		return // Skipped
-	}
 	defer clientManager.Close()
 
 	clientCtx, clientCancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -575,13 +541,9 @@ func TestSystem_ConcurrentConnections(t *testing.T) {
 
 	// Create client
 	clientClient := createTestClient(t)
-	require.NotNil(t, clientClient)
 	defer clientClient.Close()
 
 	clientManager := createTestManager(t, clientClient)
-	if clientManager == nil {
-		return // Skipped
-	}
 	defer clientManager.Close()
 
 	clientCtx, clientCancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -633,15 +595,9 @@ func TestSystem_ConcurrentConnections(t *testing.T) {
 // TestSystem_ConnectionTimeout tests connection timeout behavior.
 func TestSystem_ConnectionTimeout(t *testing.T) {
 	client := createTestClient(t)
-	if client == nil {
-		return
-	}
 	defer client.Close()
 
 	manager := createTestManager(t, client)
-	if manager == nil {
-		return // Skipped
-	}
 	defer manager.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), getTestTimeout())
