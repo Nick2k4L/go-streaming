@@ -14,6 +14,8 @@ package streaming
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -66,6 +68,25 @@ func (s ConnState) String() string {
 	default:
 		return "UNKNOWN"
 	}
+}
+
+// hashDestination creates a SHA-256 hash of an I2P destination for replay prevention.
+// The hash is used in SYN packets' NACK field to prove the sender knows the recipient's destination.
+// Returns 32-byte hash suitable for extracting 8 uint32 values.
+func hashDestination(dest *go_i2cp.Destination) ([]byte, error) {
+	if dest == nil {
+		return nil, fmt.Errorf("destination is nil")
+	}
+
+	// Serialize the destination to bytes
+	stream := go_i2cp.NewStream(make([]byte, 0, 512))
+	if err := dest.WriteToStream(stream); err != nil {
+		return nil, fmt.Errorf("serialize destination: %w", err)
+	}
+
+	// Hash the serialized destination
+	hash := sha256.Sum256(stream.Bytes())
+	return hash[:], nil
 }
 
 // I2PAddr implements the net.Addr interface for I2P destinations.
@@ -322,19 +343,45 @@ func DialWithMTU(session *go_i2cp.Session, dest *go_i2cp.Destination, localPort,
 
 // sendSYN sends a SYN packet to initiate the handshake.
 // Includes our MTU in the MAX_PACKET_SIZE_INCLUDED option for negotiation.
+// Per I2P spec, SYN packets include:
+//   - 8 NACKs containing hash of remote destination (replay prevention)
+//   - FROM destination (our address for replies)
+//   - Packet signature (authentication)
 func (s *StreamConn) sendSYN() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Generate destination hash for replay prevention
+	// Hash the remote destination and extract 8 uint32 values
+	destHash, err := hashDestination(s.dest)
+	if err != nil {
+		return fmt.Errorf("hash destination: %w", err)
+	}
+	nacks := make([]uint32, 8)
+	for i := 0; i < 8; i++ {
+		nacks[i] = binary.BigEndian.Uint32(destHash[i*4 : (i+1)*4])
+	}
+
 	pkt := &Packet{
-		SendStreamID:  uint32(s.localPort),
-		RecvStreamID:  uint32(s.remotePort),
-		SequenceNum:   s.sendSeq,
-		AckThrough:    0, // No ACK yet
-		Flags:         FlagSYN | FlagMaxPacketSizeIncluded,
-		MaxPacketSize: s.localMTU, // Advertise our MTU
+		SendStreamID:    uint32(s.localPort),
+		RecvStreamID:    uint32(s.remotePort),
+		SequenceNum:     s.sendSeq,
+		AckThrough:      0, // No ACK yet
+		Flags:           FlagSYN | FlagMaxPacketSizeIncluded | FlagSignatureIncluded | FlagFromIncluded,
+		MaxPacketSize:   s.localMTU, // Advertise our MTU
+		NACKs:           nacks,      // Replay prevention
+		FromDestination: s.session.Destination(),
 		// Payload could contain initial data (allowed per spec)
 		// For MVP, keep it simple - no initial data in SYN
+	}
+
+	// Sign the packet with session's signing key
+	keyPair, err := s.session.SigningKeyPair()
+	if err != nil {
+		return fmt.Errorf("get signing key: %w", err)
+	}
+	if err := SignPacket(pkt, keyPair); err != nil {
+		return fmt.Errorf("sign SYN: %w", err)
 	}
 
 	data, err := pkt.Marshal()
@@ -354,6 +401,7 @@ func (s *StreamConn) sendSYN() error {
 		Uint16("localMTU", s.localMTU).
 		Uint16("localPort", s.localPort).
 		Uint16("remotePort", s.remotePort).
+		Int("nacks", len(nacks)).
 		Msg("sent SYN")
 
 	return nil
