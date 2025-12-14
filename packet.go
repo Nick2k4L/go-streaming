@@ -54,6 +54,10 @@ type Packet struct {
 	ResendDelay   uint8    // Resend delay hint (changed from uint16 per spec)
 	MaxPacketSize uint16   // MTU - maximum payload size in bytes (sent with SYN)
 
+	// Authentication fields (presence indicated by FlagFromIncluded and FlagSignatureIncluded)
+	FromDestination *go_i2cp.Destination // Source destination when FlagFromIncluded is set (387+ bytes)
+	Signature       []byte               // Packet signature when FlagSignatureIncluded is set (variable length based on key type)
+
 	// Payload
 	Payload []byte
 }
@@ -79,9 +83,9 @@ type Packet struct {
 //   - Selective acknowledgment: indicate which packets were not received
 //   - Replay prevention: SYN packets include 8 NACKs containing destination hash
 //
-// This implementation still lacks (to be added in future phases):
-//   - Signature (for SIGNATURE_INCLUDED flag)
-//   - From field (for FROM_INCLUDED flag)
+// Signature and FROM destination fields (when flags are set):
+//   - FROM destination: variable length (387+ bytes for standard EdDSA destination)
+//   - Signature: variable length based on destination key type (40-512 bytes)
 func (p *Packet) Marshal() ([]byte, error) {
 	// Calculate option data size based on flags
 	optionSize := uint16(0)
@@ -90,6 +94,31 @@ func (p *Packet) Marshal() ([]byte, error) {
 	}
 	if p.Flags&FlagMaxPacketSizeIncluded != 0 {
 		optionSize += 2 // MaxPacketSize
+	}
+
+	// Calculate FROM destination size (if included)
+	var fromBytes []byte
+	if p.Flags&FlagFromIncluded != 0 {
+		if p.FromDestination == nil {
+			return nil, fmt.Errorf("FlagFromIncluded set but FromDestination is nil")
+		}
+		// Encode destination to I2CP message format
+		stream := go_i2cp.NewStream(make([]byte, 0, 512))
+		if err := p.FromDestination.WriteToMessage(stream); err != nil {
+			return nil, fmt.Errorf("encode FROM destination: %w", err)
+		}
+		fromBytes = stream.Bytes()
+		optionSize += uint16(len(fromBytes))
+	}
+
+	// Calculate signature size (if included)
+	sigLen := 0
+	if p.Flags&FlagSignatureIncluded != 0 {
+		sigLen = getSignatureLength(p.FromDestination)
+		if sigLen == 0 {
+			return nil, fmt.Errorf("FlagSignatureIncluded set but cannot determine signature length")
+		}
+		optionSize += uint16(sigLen)
 	}
 
 	// Estimate buffer size: header (22 bytes) + options + payload
@@ -132,7 +161,7 @@ func (p *Packet) Marshal() ([]byte, error) {
 	buf = append(buf, tmp2[:]...)
 
 	// Option Data (variable length, determined by flags)
-	// Order matters per spec: DELAY_REQUESTED (bit 6), MAX_PACKET_SIZE_INCLUDED (bit 7)
+	// Order matters per spec: DELAY_REQUESTED, MAX_PACKET_SIZE_INCLUDED, FROM_INCLUDED, SIGNATURE_INCLUDED
 	if p.Flags&FlagDelayRequested != 0 {
 		binary.BigEndian.PutUint16(tmp2[:], p.OptionalDelay)
 		buf = append(buf, tmp2[:]...)
@@ -140,6 +169,21 @@ func (p *Packet) Marshal() ([]byte, error) {
 	if p.Flags&FlagMaxPacketSizeIncluded != 0 {
 		binary.BigEndian.PutUint16(tmp2[:], p.MaxPacketSize)
 		buf = append(buf, tmp2[:]...)
+	}
+	if p.Flags&FlagFromIncluded != 0 {
+		buf = append(buf, fromBytes...)
+	}
+	if p.Flags&FlagSignatureIncluded != 0 {
+		// If signature is already set, use it; otherwise reserve space with zeros
+		if len(p.Signature) > 0 {
+			if len(p.Signature) != sigLen {
+				return nil, fmt.Errorf("signature length mismatch: expected %d, got %d", sigLen, len(p.Signature))
+			}
+			buf = append(buf, p.Signature...)
+		} else {
+			// Reserve space for signature (caller will fill it later)
+			buf = append(buf, make([]byte, sigLen)...)
+		}
 	}
 
 	// Payload
@@ -166,6 +210,8 @@ func (p *Packet) Marshal() ([]byte, error) {
 //   - Option Data: variable length (determined by flags and Option Size)
 //   - OptionalDelay: 2 bytes (if FlagDelayRequested is set)
 //   - MaxPacketSize: 2 bytes (if FlagMaxPacketSizeIncluded is set)
+//   - FROM destination: variable length 387+ bytes (if FlagFromIncluded is set)
+//   - Signature: variable length 40-512 bytes (if FlagSignatureIncluded is set)
 //   - Payload: variable length (everything remaining after options)
 //
 // Returns an error if the data is too short or malformed.
@@ -224,7 +270,7 @@ func (p *Packet) Unmarshal(data []byte) error {
 	}
 
 	// Parse option data based on flags
-	// Order matters per spec: DELAY_REQUESTED (bit 6), MAX_PACKET_SIZE_INCLUDED (bit 7)
+	// Order matters per spec: DELAY_REQUESTED, MAX_PACKET_SIZE_INCLUDED, FROM_INCLUDED, SIGNATURE_INCLUDED
 	optionsEnd := offset + int(optionSize)
 	if p.Flags&FlagDelayRequested != 0 {
 		if offset+2 > optionsEnd {
@@ -239,6 +285,40 @@ func (p *Packet) Unmarshal(data []byte) error {
 		}
 		p.MaxPacketSize = binary.BigEndian.Uint16(data[offset:])
 		offset += 2
+	}
+	if p.Flags&FlagFromIncluded != 0 {
+		// Parse FROM destination (variable length, minimum 387 bytes for standard EdDSA)
+		if offset >= optionsEnd {
+			return fmt.Errorf("option data too short for FROM destination")
+		}
+		// Decode destination from I2CP message format
+		stream := go_i2cp.NewStream(data[offset:optionsEnd])
+		dest, err := go_i2cp.NewDestinationFromMessage(stream, nil)
+		if err != nil {
+			return fmt.Errorf("unmarshal FROM destination: %w", err)
+		}
+		p.FromDestination = dest
+		// Calculate how many bytes were consumed by encoding the destination
+		// We encode it again to determine its size
+		tempStream := go_i2cp.NewStream(make([]byte, 0, 512))
+		if err := dest.WriteToMessage(tempStream); err != nil {
+			return fmt.Errorf("calculate FROM destination size: %w", err)
+		}
+		bytesRead := len(tempStream.Bytes())
+		offset += bytesRead
+	}
+	if p.Flags&FlagSignatureIncluded != 0 {
+		// Parse signature (variable length based on destination key type)
+		sigLen := getSignatureLength(p.FromDestination)
+		if sigLen == 0 {
+			return fmt.Errorf("cannot determine signature length (no FROM destination)")
+		}
+		if offset+sigLen > optionsEnd {
+			return fmt.Errorf("option data too short for signature: need %d bytes, have %d", sigLen, optionsEnd-offset)
+		}
+		p.Signature = make([]byte, sigLen)
+		copy(p.Signature, data[offset:offset+sigLen])
+		offset += sigLen
 	}
 
 	// Skip any unrecognized option data
@@ -344,4 +424,22 @@ func generateISN() (uint32, error) {
 		return 0, fmt.Errorf("generate random ISN: %w", err)
 	}
 	return binary.BigEndian.Uint32(isn[:]), nil
+}
+
+// getSignatureLength returns the signature length in bytes for a given destination's key type.
+//
+// I2P modern streaming protocol uses Ed25519 signatures:
+//   - EdDSA (Ed25519): 64 bytes - current standard (go-i2cp constant ED25519_SHA256 = 7)
+//
+// Design rationale:
+//   - Returns 0 for nil destination (no signature space needed)
+//   - Returns 64 bytes (Ed25519 size) as go-i2cp only supports Ed25519 signatures
+//   - Legacy signature types (DSA, ECDSA, RSA) are not supported by go-i2cp
+func getSignatureLength(dest *go_i2cp.Destination) int {
+	if dest == nil {
+		return 0
+	}
+	// go-i2cp only supports Ed25519 signatures (64 bytes)
+	// All modern I2P destinations use Ed25519
+	return 64
 }

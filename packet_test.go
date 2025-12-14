@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"testing"
 
+	go_i2cp "github.com/go-i2p/go-i2cp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -121,7 +122,7 @@ func TestPacketMarshalBigEndian(t *testing.T) {
 		RecvStreamID: 0x9ABCDEF0,
 		SequenceNum:  0xFEDCBA98,
 		AckThrough:   0x76543210,
-		Flags:        0xABCD,
+		Flags:        0x003D, // Clear FROM_INCLUDED (bit 7) and SIGNATURE_INCLUDED (bit 6) to avoid validation errors
 	}
 
 	data, err := pkt.Marshal()
@@ -137,7 +138,7 @@ func TestPacketMarshalBigEndian(t *testing.T) {
 		{"RecvStreamID", 4, []byte{0x9A, 0xBC, 0xDE, 0xF0}},
 		{"SequenceNum", 8, []byte{0xFE, 0xDC, 0xBA, 0x98}},
 		{"AckThrough", 12, []byte{0x76, 0x54, 0x32, 0x10}},
-		{"Flags", 18, []byte{0xAB, 0xCD}},
+		{"Flags", 18, []byte{0x00, 0x3D}}, // Updated to match new flags value (0x003D)
 	}
 
 	for _, tt := range tests {
@@ -460,8 +461,8 @@ func TestPacketUnmarshalBigEndian(t *testing.T) {
 	data[16] = 0
 	// ResendDelay: 0x12 (1 byte now)
 	data[17] = 0x12
-	// Flags: 0x00FF (lower 8 bits set, avoiding bits 8 and 9)
-	data[18], data[19] = 0x00, 0xFF
+	// Flags: 0x003F (lower 6 bits set, avoiding FROM_INCLUDED and SIGNATURE_INCLUDED)
+	data[18], data[19] = 0x00, 0x3F
 	// Option Size: 0
 	data[20], data[21] = 0x00, 0x00
 
@@ -474,7 +475,7 @@ func TestPacketUnmarshalBigEndian(t *testing.T) {
 	assert.Equal(t, uint32(0xFEDCBA98), pkt.SequenceNum, "SequenceNum")
 	assert.Equal(t, uint32(0x76543210), pkt.AckThrough, "AckThrough")
 	assert.Equal(t, uint8(0x12), pkt.ResendDelay, "ResendDelay")
-	assert.Equal(t, uint16(0x00FF), pkt.Flags, "Flags")
+	assert.Equal(t, uint16(0x003F), pkt.Flags, "Flags")
 }
 
 // TestPacketRoundTrip verifies Marshal/Unmarshal are inverse operations.
@@ -533,8 +534,8 @@ func TestPacketRoundTrip(t *testing.T) {
 				RecvStreamID: 0x9ABCDEF0,
 				SequenceNum:  0xFEDCBA98,
 				AckThrough:   0x76543210,
-				Flags:        FlagSYN | FlagACK | FlagFromIncluded,
-				ResendDelay:  150, // Changed from 1500 to fit uint8 (max 255)
+				Flags:        FlagSYN | FlagACK, // Removed FlagFromIncluded as we don't have a FromDestination
+				ResendDelay:  150,               // Changed from 1500 to fit uint8 (max 255)
 				Payload:      []byte("round trip test"),
 			},
 		},
@@ -1026,4 +1027,347 @@ func TestPacketMarshalTooManyNACKs(t *testing.T) {
 	_, err := pkt.Marshal()
 	require.Error(t, err, "Marshal should fail with too many NACKs")
 	assert.Contains(t, err.Error(), "too many NACKs", "Error message should mention NACKs limit")
+}
+
+// TestPacketWithFromDestination tests marshalling/unmarshalling packets with FROM destination.
+func TestPacketWithFromDestination(t *testing.T) {
+	// Create a test destination
+	crypto := go_i2cp.NewCrypto()
+
+	dest, err := go_i2cp.NewDestination(crypto)
+	require.NoError(t, err, "Failed to create destination")
+
+	t.Run("marshal packet with FROM destination", func(t *testing.T) {
+		pkt := &Packet{
+			SendStreamID:    1,
+			RecvStreamID:    2,
+			SequenceNum:     100,
+			AckThrough:      99,
+			Flags:           FlagSYN | FlagFromIncluded,
+			FromDestination: dest,
+		}
+
+		data, err := pkt.Marshal()
+		require.NoError(t, err, "Marshal should succeed with FROM destination")
+
+		// Verify packet size includes destination (387+ bytes for EdDSA)
+		// Header (22 bytes) + destination (387+ bytes) = 409+ bytes
+		assert.GreaterOrEqual(t, len(data), 409, "Packet with FROM should be at least 409 bytes")
+
+		// Verify FROM flag is set
+		flags := binary.BigEndian.Uint16(data[18:20])
+		assert.Equal(t, FlagSYN|FlagFromIncluded, flags, "FROM flag should be set")
+	})
+
+	t.Run("unmarshal packet with FROM destination", func(t *testing.T) {
+		// First marshal a packet
+		original := &Packet{
+			SendStreamID:    10,
+			RecvStreamID:    20,
+			SequenceNum:     500,
+			AckThrough:      499,
+			Flags:           FlagACK | FlagFromIncluded,
+			FromDestination: dest,
+			Payload:         []byte("test"),
+		}
+
+		data, err := original.Marshal()
+		require.NoError(t, err, "Marshal should succeed")
+
+		// Now unmarshal it
+		parsed := &Packet{}
+		err = parsed.Unmarshal(data)
+		require.NoError(t, err, "Unmarshal should succeed with FROM destination")
+
+		// Verify fields
+		assert.Equal(t, original.SendStreamID, parsed.SendStreamID)
+		assert.Equal(t, original.RecvStreamID, parsed.RecvStreamID)
+		assert.Equal(t, original.SequenceNum, parsed.SequenceNum)
+		assert.Equal(t, original.AckThrough, parsed.AckThrough)
+		assert.Equal(t, original.Flags, parsed.Flags)
+		assert.Equal(t, original.Payload, parsed.Payload)
+		assert.NotNil(t, parsed.FromDestination, "FROM destination should be parsed")
+	})
+
+	t.Run("marshal without FROM when flag not set", func(t *testing.T) {
+		pkt := &Packet{
+			SendStreamID:    1,
+			RecvStreamID:    2,
+			SequenceNum:     100,
+			AckThrough:      99,
+			Flags:           FlagSYN, // No FlagFromIncluded
+			FromDestination: dest,    // Destination present but flag not set
+		}
+
+		data, err := pkt.Marshal()
+		require.NoError(t, err, "Marshal should succeed")
+
+		// Packet should be minimal size (no destination included)
+		assert.Equal(t, 22, len(data), "Packet without FROM flag should be 22 bytes")
+	})
+
+	t.Run("error when FROM flag set but destination is nil", func(t *testing.T) {
+		pkt := &Packet{
+			SendStreamID:    1,
+			RecvStreamID:    2,
+			SequenceNum:     100,
+			AckThrough:      99,
+			Flags:           FlagSYN | FlagFromIncluded,
+			FromDestination: nil, // Flag set but no destination
+		}
+
+		_, err := pkt.Marshal()
+		require.Error(t, err, "Marshal should fail when FROM flag set but destination is nil")
+		assert.Contains(t, err.Error(), "FromDestination is nil")
+	})
+}
+
+// TestPacketWithSignature tests marshalling/unmarshalling packets with signatures.
+func TestPacketWithSignature(t *testing.T) {
+	// Create a test destination (needed for signature length calculation)
+	crypto := go_i2cp.NewCrypto()
+
+	dest, err := go_i2cp.NewDestination(crypto)
+	require.NoError(t, err, "Failed to create destination")
+
+	// Ed25519 signature is 64 bytes
+	testSignature := make([]byte, 64)
+	for i := range testSignature {
+		testSignature[i] = byte(i)
+	}
+
+	t.Run("marshal packet with signature", func(t *testing.T) {
+		pkt := &Packet{
+			SendStreamID:    1,
+			RecvStreamID:    2,
+			SequenceNum:     100,
+			AckThrough:      99,
+			Flags:           FlagSYN | FlagFromIncluded | FlagSignatureIncluded,
+			FromDestination: dest,
+			Signature:       testSignature,
+		}
+
+		data, err := pkt.Marshal()
+		require.NoError(t, err, "Marshal should succeed with signature")
+
+		// Verify packet size: header (22) + destination (387+) + signature (64) = 473+ bytes
+		assert.GreaterOrEqual(t, len(data), 473, "Packet with FROM+SIG should be at least 473 bytes")
+
+		// Verify flags
+		flags := binary.BigEndian.Uint16(data[18:20])
+		assert.Equal(t, FlagSYN|FlagFromIncluded|FlagSignatureIncluded, flags)
+	})
+
+	t.Run("marshal reserves space for signature when not provided", func(t *testing.T) {
+		pkt := &Packet{
+			SendStreamID:    1,
+			RecvStreamID:    2,
+			SequenceNum:     100,
+			AckThrough:      99,
+			Flags:           FlagSYN | FlagFromIncluded | FlagSignatureIncluded,
+			FromDestination: dest,
+			Signature:       nil, // No signature provided - should reserve space
+		}
+
+		data, err := pkt.Marshal()
+		require.NoError(t, err, "Marshal should succeed and reserve signature space")
+
+		// Should still include 64 bytes for signature (all zeros)
+		assert.GreaterOrEqual(t, len(data), 473, "Packet should reserve signature space")
+	})
+
+	t.Run("unmarshal packet with signature", func(t *testing.T) {
+		// First marshal a packet
+		original := &Packet{
+			SendStreamID:    10,
+			RecvStreamID:    20,
+			SequenceNum:     500,
+			AckThrough:      499,
+			Flags:           FlagACK | FlagFromIncluded | FlagSignatureIncluded,
+			FromDestination: dest,
+			Signature:       testSignature,
+			Payload:         []byte("signed"),
+		}
+
+		data, err := original.Marshal()
+		require.NoError(t, err, "Marshal should succeed")
+
+		// Now unmarshal it
+		parsed := &Packet{}
+		err = parsed.Unmarshal(data)
+		require.NoError(t, err, "Unmarshal should succeed with signature")
+
+		// Verify fields
+		assert.Equal(t, original.SendStreamID, parsed.SendStreamID)
+		assert.Equal(t, original.Flags, parsed.Flags)
+		assert.NotNil(t, parsed.FromDestination, "FROM destination should be parsed")
+		assert.NotNil(t, parsed.Signature, "Signature should be parsed")
+		assert.Equal(t, 64, len(parsed.Signature), "Signature should be 64 bytes (Ed25519)")
+		assert.Equal(t, testSignature, parsed.Signature, "Signature should match")
+		assert.Equal(t, original.Payload, parsed.Payload)
+	})
+
+	t.Run("error when signature flag set but no FROM destination", func(t *testing.T) {
+		pkt := &Packet{
+			SendStreamID:    1,
+			RecvStreamID:    2,
+			SequenceNum:     100,
+			AckThrough:      99,
+			Flags:           FlagSYN | FlagSignatureIncluded, // Signature flag but no FROM flag
+			FromDestination: nil,
+			Signature:       testSignature,
+		}
+
+		_, err := pkt.Marshal()
+		require.Error(t, err, "Marshal should fail when signature flag set without FROM destination")
+		assert.Contains(t, err.Error(), "cannot determine signature length")
+	})
+
+	t.Run("error when signature length mismatch", func(t *testing.T) {
+		wrongSig := make([]byte, 40) // Wrong size (should be 64)
+
+		pkt := &Packet{
+			SendStreamID:    1,
+			RecvStreamID:    2,
+			SequenceNum:     100,
+			AckThrough:      99,
+			Flags:           FlagSYN | FlagFromIncluded | FlagSignatureIncluded,
+			FromDestination: dest,
+			Signature:       wrongSig, // Wrong size
+		}
+
+		_, err := pkt.Marshal()
+		require.Error(t, err, "Marshal should fail with wrong signature length")
+		assert.Contains(t, err.Error(), "signature length mismatch")
+	})
+}
+
+// TestPacketRoundTripWithAuthFields tests full marshal/unmarshal cycle with FROM and signature.
+func TestPacketRoundTripWithAuthFields(t *testing.T) {
+	// Create a test destination
+	crypto := go_i2cp.NewCrypto()
+
+	dest, err := go_i2cp.NewDestination(crypto)
+	require.NoError(t, err, "Failed to create destination")
+
+	testSignature := make([]byte, 64)
+	for i := range testSignature {
+		testSignature[i] = byte(i % 256)
+	}
+
+	tests := []struct {
+		name   string
+		packet *Packet
+	}{
+		{
+			name: "SYN with FROM only",
+			packet: &Packet{
+				SendStreamID:    0,
+				RecvStreamID:    12345,
+				SequenceNum:     1000,
+				AckThrough:      0,
+				Flags:           FlagSYN | FlagFromIncluded,
+				FromDestination: dest,
+			},
+		},
+		{
+			name: "SYN with FROM and signature",
+			packet: &Packet{
+				SendStreamID:    0,
+				RecvStreamID:    12345,
+				SequenceNum:     1000,
+				AckThrough:      0,
+				Flags:           FlagSYN | FlagFromIncluded | FlagSignatureIncluded,
+				FromDestination: dest,
+				Signature:       testSignature,
+			},
+		},
+		{
+			name: "ACK with FROM, signature, and payload",
+			packet: &Packet{
+				SendStreamID:    54321,
+				RecvStreamID:    12345,
+				SequenceNum:     2000,
+				AckThrough:      1999,
+				Flags:           FlagACK | FlagFromIncluded | FlagSignatureIncluded,
+				FromDestination: dest,
+				Signature:       testSignature,
+				Payload:         []byte("authenticated data"),
+			},
+		},
+		{
+			name: "Complex packet with all fields",
+			packet: &Packet{
+				SendStreamID:    54321,
+				RecvStreamID:    12345,
+				SequenceNum:     3000,
+				AckThrough:      2999,
+				Flags:           FlagACK | FlagDelayRequested | FlagMaxPacketSizeIncluded | FlagFromIncluded | FlagSignatureIncluded,
+				OptionalDelay:   500,
+				MaxPacketSize:   1024,
+				FromDestination: dest,
+				Signature:       testSignature,
+				Payload:         []byte("complex packet"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Marshal the packet
+			data, err := tt.packet.Marshal()
+			require.NoError(t, err, "Marshal should succeed")
+
+			// Unmarshal it
+			parsed := &Packet{}
+			err = parsed.Unmarshal(data)
+			require.NoError(t, err, "Unmarshal should succeed")
+
+			// Verify all fields match
+			assert.Equal(t, tt.packet.SendStreamID, parsed.SendStreamID, "SendStreamID mismatch")
+			assert.Equal(t, tt.packet.RecvStreamID, parsed.RecvStreamID, "RecvStreamID mismatch")
+			assert.Equal(t, tt.packet.SequenceNum, parsed.SequenceNum, "SequenceNum mismatch")
+			assert.Equal(t, tt.packet.AckThrough, parsed.AckThrough, "AckThrough mismatch")
+			assert.Equal(t, tt.packet.Flags, parsed.Flags, "Flags mismatch")
+			assert.Equal(t, tt.packet.OptionalDelay, parsed.OptionalDelay, "OptionalDelay mismatch")
+			assert.Equal(t, tt.packet.MaxPacketSize, parsed.MaxPacketSize, "MaxPacketSize mismatch")
+			assert.Equal(t, tt.packet.Payload, parsed.Payload, "Payload mismatch")
+
+			// Verify FROM destination if present
+			if tt.packet.Flags&FlagFromIncluded != 0 {
+				assert.NotNil(t, parsed.FromDestination, "FROM destination should be present")
+			} else {
+				assert.Nil(t, parsed.FromDestination, "FROM destination should not be present")
+			}
+
+			// Verify signature if present
+			if tt.packet.Flags&FlagSignatureIncluded != 0 {
+				assert.NotNil(t, parsed.Signature, "Signature should be present")
+				assert.Equal(t, len(tt.packet.Signature), len(parsed.Signature), "Signature length mismatch")
+				if tt.packet.Signature != nil {
+					assert.Equal(t, tt.packet.Signature, parsed.Signature, "Signature content mismatch")
+				}
+			} else {
+				assert.Nil(t, parsed.Signature, "Signature should not be present")
+			}
+		})
+	}
+}
+
+// TestGetSignatureLength tests the signature length calculation helper.
+func TestGetSignatureLength(t *testing.T) {
+	t.Run("nil destination returns 0", func(t *testing.T) {
+		length := getSignatureLength(nil)
+		assert.Equal(t, 0, length, "Nil destination should return 0")
+	})
+
+	t.Run("Ed25519 destination returns 64 bytes", func(t *testing.T) {
+		crypto := go_i2cp.NewCrypto()
+
+		dest, err := go_i2cp.NewDestination(crypto)
+		require.NoError(t, err)
+
+		length := getSignatureLength(dest)
+		assert.Equal(t, 64, length, "Ed25519 should return 64 bytes")
+	})
 }
