@@ -50,7 +50,7 @@ type Packet struct {
 
 	// Optional fields (presence indicated by flags or special values)
 	OptionalDelay uint16 // Optional delay in ms (0-60000 = delay, >60000 = choked)
-	ResendDelay   uint16 // Resend delay hint
+	ResendDelay   uint8  // Resend delay hint (changed from uint16 per spec)
 	MaxPacketSize uint16 // MTU - maximum payload size in bytes (sent with SYN)
 
 	// Payload
@@ -65,7 +65,7 @@ type Packet struct {
 //   - SequenceNum: 4 bytes
 //   - AckThrough: 4 bytes
 //   - NACKCount: 1 byte (not implemented in MVP - always 0)
-//   - ResendDelay: 2 bytes
+//   - ResendDelay: 1 byte (changed from 2 bytes per spec)
 //   - Flags: 2 bytes
 //   - Option Size: 2 bytes (length of option data)
 //   - Option Data: variable length (determined by flags)
@@ -87,8 +87,8 @@ func (p *Packet) Marshal() ([]byte, error) {
 		optionSize += 2 // MaxPacketSize
 	}
 
-	// Estimate buffer size: header (23 bytes) + options + payload
-	buf := make([]byte, 0, 23+int(optionSize)+len(p.Payload))
+	// Estimate buffer size: header (22 bytes) + options + payload
+	buf := make([]byte, 0, 22+int(optionSize)+len(p.Payload))
 
 	// Required fields (18 bytes)
 	var tmp [4]byte
@@ -104,12 +104,11 @@ func (p *Packet) Marshal() ([]byte, error) {
 	// NACKCount (1 byte) - always 0 for MVP
 	buf = append(buf, 0)
 
-	// ResendDelay (2 bytes)
-	var tmp2 [2]byte
-	binary.BigEndian.PutUint16(tmp2[:], p.ResendDelay)
-	buf = append(buf, tmp2[:]...)
+	// ResendDelay (1 byte) - changed from 2 bytes per spec
+	buf = append(buf, p.ResendDelay)
 
 	// Flags (2 bytes)
+	var tmp2 [2]byte
 	binary.BigEndian.PutUint16(tmp2[:], p.Flags)
 	buf = append(buf, tmp2[:]...)
 
@@ -145,7 +144,7 @@ func (p *Packet) Marshal() ([]byte, error) {
 //   - SequenceNum: 4 bytes (required)
 //   - AckThrough: 4 bytes (required)
 //   - NACKCount: 1 byte (required, but always 0 for MVP)
-//   - ResendDelay: 2 bytes (required)
+//   - ResendDelay: 1 byte (required, changed from 2 bytes per spec)
 //   - Flags: 2 bytes (required)
 //   - OptionalDelay: 2 bytes (optional - see note below)
 //   - Payload: variable length (everything remaining)
@@ -178,9 +177,9 @@ func (p *Packet) Marshal() ([]byte, error) {
 //
 // Returns an error if the data is too short or malformed.
 func (p *Packet) Unmarshal(data []byte) error {
-	// Minimum packet size: 23 bytes (18 required + 1 NACKCount + 2 ResendDelay + 2 Flags + 2 OptionSize)
-	if len(data) < 23 {
-		return fmt.Errorf("packet too short: got %d bytes, need at least 23", len(data))
+	// Minimum packet size: 22 bytes (18 required + 1 NACKCount + 1 ResendDelay + 2 Flags + 2 OptionSize)
+	if len(data) < 22 {
+		return fmt.Errorf("packet too short: got %d bytes, need at least 22", len(data))
 	}
 
 	offset := 0
@@ -203,9 +202,9 @@ func (p *Packet) Unmarshal(data []byte) error {
 		return fmt.Errorf("NACK support not implemented (got NACKCount=%d)", nackCount)
 	}
 
-	// ResendDelay (2 bytes)
-	p.ResendDelay = binary.BigEndian.Uint16(data[offset:])
-	offset += 2
+	// ResendDelay (1 byte) - changed from 2 bytes per spec
+	p.ResendDelay = uint8(data[offset])
+	offset++
 
 	// Flags (2 bytes)
 	p.Flags = binary.BigEndian.Uint16(data[offset:])

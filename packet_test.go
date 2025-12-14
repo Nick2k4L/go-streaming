@@ -25,15 +25,16 @@ func TestPacketMarshal(t *testing.T) {
 				AckThrough:   99,
 				Flags:        FlagSYN,
 			},
-			wantLen: 23, // 4+4+4+4+1+2+2+2 = 23 bytes (added 2-byte Option Size)
+			wantLen: 22, // 4+4+4+4+1+1+2+2 = 22 bytes (ResendDelay changed from 2 to 1 byte)
 			check: func(t *testing.T, data []byte) {
 				assert.Equal(t, uint32(1), binary.BigEndian.Uint32(data[0:4]), "SendStreamID")
 				assert.Equal(t, uint32(2), binary.BigEndian.Uint32(data[4:8]), "RecvStreamID")
 				assert.Equal(t, uint32(100), binary.BigEndian.Uint32(data[8:12]), "SequenceNum")
 				assert.Equal(t, uint32(99), binary.BigEndian.Uint32(data[12:16]), "AckThrough")
 				assert.Equal(t, uint8(0), data[16], "NACKCount")
-				assert.Equal(t, FlagSYN, binary.BigEndian.Uint16(data[19:21]), "Flags")
-				assert.Equal(t, uint16(0), binary.BigEndian.Uint16(data[21:23]), "Option Size")
+				assert.Equal(t, uint8(0), data[17], "ResendDelay")
+				assert.Equal(t, FlagSYN, binary.BigEndian.Uint16(data[18:20]), "Flags")
+				assert.Equal(t, uint16(0), binary.BigEndian.Uint16(data[20:22]), "Option Size")
 			},
 		},
 		{
@@ -46,9 +47,9 @@ func TestPacketMarshal(t *testing.T) {
 				Flags:        FlagACK,
 				Payload:      []byte("hello"),
 			},
-			wantLen: 28, // 23 + 5 bytes payload
+			wantLen: 27, // 22 + 5 bytes payload
 			check: func(t *testing.T, data []byte) {
-				assert.Equal(t, []byte("hello"), data[23:], "Payload")
+				assert.Equal(t, []byte("hello"), data[22:], "Payload")
 			},
 		},
 		{
@@ -61,10 +62,10 @@ func TestPacketMarshal(t *testing.T) {
 				Flags:         FlagACK | FlagDelayRequested,
 				OptionalDelay: 1000, // 1 second delay
 			},
-			wantLen: 25, // 23 + 2 bytes optional delay
+			wantLen: 24, // 22 + 2 bytes optional delay
 			check: func(t *testing.T, data []byte) {
-				assert.Equal(t, uint16(2), binary.BigEndian.Uint16(data[21:23]), "Option Size")
-				assert.Equal(t, uint16(1000), binary.BigEndian.Uint16(data[23:25]), "OptionalDelay")
+				assert.Equal(t, uint16(2), binary.BigEndian.Uint16(data[20:22]), "Option Size")
+				assert.Equal(t, uint16(1000), binary.BigEndian.Uint16(data[22:24]), "OptionalDelay")
 			},
 		},
 		{
@@ -77,10 +78,10 @@ func TestPacketMarshal(t *testing.T) {
 				Flags:         FlagACK | FlagDelayRequested,
 				OptionalDelay: 60001, // Indicates choking
 			},
-			wantLen: 25,
+			wantLen: 24,
 			check: func(t *testing.T, data []byte) {
-				assert.Equal(t, uint16(2), binary.BigEndian.Uint16(data[21:23]), "Option Size")
-				assert.Equal(t, uint16(60001), binary.BigEndian.Uint16(data[23:25]), "OptionalDelay (choked)")
+				assert.Equal(t, uint16(2), binary.BigEndian.Uint16(data[20:22]), "Option Size")
+				assert.Equal(t, uint16(60001), binary.BigEndian.Uint16(data[22:24]), "OptionalDelay (choked)")
 			},
 		},
 		{
@@ -92,9 +93,9 @@ func TestPacketMarshal(t *testing.T) {
 				AckThrough:   0,
 				Flags:        FlagSYN | FlagACK,
 			},
-			wantLen: 23,
+			wantLen: 22,
 			check: func(t *testing.T, data []byte) {
-				assert.Equal(t, FlagSYN|FlagACK, binary.BigEndian.Uint16(data[19:21]), "Flags")
+				assert.Equal(t, FlagSYN|FlagACK, binary.BigEndian.Uint16(data[18:20]), "Flags")
 			},
 		},
 	}
@@ -136,7 +137,7 @@ func TestPacketMarshalBigEndian(t *testing.T) {
 		{"RecvStreamID", 4, []byte{0x9A, 0xBC, 0xDE, 0xF0}},
 		{"SequenceNum", 8, []byte{0xFE, 0xDC, 0xBA, 0x98}},
 		{"AckThrough", 12, []byte{0x76, 0x54, 0x32, 0x10}},
-		{"Flags", 19, []byte{0xAB, 0xCD}},
+		{"Flags", 18, []byte{0xAB, 0xCD}},
 	}
 
 	for _, tt := range tests {
@@ -209,11 +210,11 @@ func TestPacketMarshalLargePayload(t *testing.T) {
 	data, err := pkt.Marshal()
 	require.NoError(t, err, "Marshal should not fail")
 
-	expectedLen := 23 + DefaultMTU
+	expectedLen := 22 + DefaultMTU
 	assert.Equal(t, expectedLen, len(data), "Marshal length")
 
 	// Verify payload integrity
-	assert.Equal(t, payload, data[23:], "Payload should not be corrupted")
+	assert.Equal(t, payload, data[22:], "Payload should not be corrupted")
 }
 
 // TestPacketMarshalZeroValues verifies handling of zero-value fields.
@@ -248,15 +249,15 @@ func TestPacketUnmarshal(t *testing.T) {
 			name: "minimal packet (no payload, no optional fields)",
 			data: func() []byte {
 				// Manually construct a minimal packet
-				buf := make([]byte, 23)
+				buf := make([]byte, 22)
 				binary.BigEndian.PutUint32(buf[0:], 1)        // SendStreamID
 				binary.BigEndian.PutUint32(buf[4:], 2)        // RecvStreamID
 				binary.BigEndian.PutUint32(buf[8:], 100)      // SequenceNum
 				binary.BigEndian.PutUint32(buf[12:], 99)      // AckThrough
 				buf[16] = 0                                   // NACKCount
-				binary.BigEndian.PutUint16(buf[17:], 0)       // ResendDelay
-				binary.BigEndian.PutUint16(buf[19:], FlagSYN) // Flags
-				binary.BigEndian.PutUint16(buf[21:], 0)       // Option Size
+				buf[17] = 0                                   // ResendDelay (1 byte)
+				binary.BigEndian.PutUint16(buf[18:], FlagSYN) // Flags
+				binary.BigEndian.PutUint16(buf[20:], 0)       // Option Size
 				return buf
 			}(),
 			want: &Packet{
@@ -270,15 +271,15 @@ func TestPacketUnmarshal(t *testing.T) {
 		{
 			name: "packet with payload",
 			data: func() []byte {
-				buf := make([]byte, 23)
+				buf := make([]byte, 22)
 				binary.BigEndian.PutUint32(buf[0:], 10)
 				binary.BigEndian.PutUint32(buf[4:], 20)
 				binary.BigEndian.PutUint32(buf[8:], 1000)
 				binary.BigEndian.PutUint32(buf[12:], 999)
 				buf[16] = 0
-				binary.BigEndian.PutUint16(buf[17:], 0)
-				binary.BigEndian.PutUint16(buf[19:], FlagACK)
-				binary.BigEndian.PutUint16(buf[21:], 0) // Option Size
+				buf[17] = 0
+				binary.BigEndian.PutUint16(buf[18:], FlagACK)
+				binary.BigEndian.PutUint16(buf[20:], 0) // Option Size
 				buf = append(buf, []byte("hello")...)
 				return buf
 			}(),
@@ -294,16 +295,16 @@ func TestPacketUnmarshal(t *testing.T) {
 		{
 			name: "packet with optional delay",
 			data: func() []byte {
-				buf := make([]byte, 25)
+				buf := make([]byte, 24)
 				binary.BigEndian.PutUint32(buf[0:], 1)
 				binary.BigEndian.PutUint32(buf[4:], 2)
 				binary.BigEndian.PutUint32(buf[8:], 1)
 				binary.BigEndian.PutUint32(buf[12:], 0)
 				buf[16] = 0
-				binary.BigEndian.PutUint16(buf[17:], 0)
-				binary.BigEndian.PutUint16(buf[19:], FlagACK|FlagDelayRequested)
-				binary.BigEndian.PutUint16(buf[21:], 2)    // Option Size
-				binary.BigEndian.PutUint16(buf[23:], 1000) // OptionalDelay
+				buf[17] = 0
+				binary.BigEndian.PutUint16(buf[18:], FlagACK|FlagDelayRequested)
+				binary.BigEndian.PutUint16(buf[20:], 2)    // Option Size
+				binary.BigEndian.PutUint16(buf[22:], 1000) // OptionalDelay
 				return buf
 			}(),
 			want: &Packet{
@@ -318,16 +319,16 @@ func TestPacketUnmarshal(t *testing.T) {
 		{
 			name: "choked packet (optional delay > 60000)",
 			data: func() []byte {
-				buf := make([]byte, 25)
+				buf := make([]byte, 24)
 				binary.BigEndian.PutUint32(buf[0:], 1)
 				binary.BigEndian.PutUint32(buf[4:], 2)
 				binary.BigEndian.PutUint32(buf[8:], 1)
 				binary.BigEndian.PutUint32(buf[12:], 0)
 				buf[16] = 0
-				binary.BigEndian.PutUint16(buf[17:], 0)
-				binary.BigEndian.PutUint16(buf[19:], FlagACK|FlagDelayRequested)
-				binary.BigEndian.PutUint16(buf[21:], 2)     // Option Size
-				binary.BigEndian.PutUint16(buf[23:], 60001) // Choking indicator
+				buf[17] = 0
+				binary.BigEndian.PutUint16(buf[18:], FlagACK|FlagDelayRequested)
+				binary.BigEndian.PutUint16(buf[20:], 2)     // Option Size
+				binary.BigEndian.PutUint16(buf[22:], 60001) // Choking indicator
 				return buf
 			}(),
 			want: &Packet{
@@ -342,15 +343,15 @@ func TestPacketUnmarshal(t *testing.T) {
 		{
 			name: "multiple flags",
 			data: func() []byte {
-				buf := make([]byte, 23)
+				buf := make([]byte, 22)
 				binary.BigEndian.PutUint32(buf[0:], 1)
 				binary.BigEndian.PutUint32(buf[4:], 2)
 				binary.BigEndian.PutUint32(buf[8:], 1)
 				binary.BigEndian.PutUint32(buf[12:], 0)
 				buf[16] = 0
-				binary.BigEndian.PutUint16(buf[17:], 0)
-				binary.BigEndian.PutUint16(buf[19:], FlagSYN|FlagACK)
-				binary.BigEndian.PutUint16(buf[21:], 0) // Option Size
+				buf[17] = 0
+				binary.BigEndian.PutUint16(buf[18:], FlagSYN|FlagACK)
+				binary.BigEndian.PutUint16(buf[20:], 0) // Option Size
 				return buf
 			}(),
 			want: &Packet{
@@ -363,21 +364,21 @@ func TestPacketUnmarshal(t *testing.T) {
 		},
 		{
 			name:    "packet too short (error case)",
-			data:    make([]byte, 22), // Need at least 23 bytes
+			data:    make([]byte, 21), // Need at least 22 bytes
 			wantErr: true,
 		},
 		{
 			name: "packet with NACK count (error case - not supported)",
 			data: func() []byte {
-				buf := make([]byte, 23)
+				buf := make([]byte, 22)
 				binary.BigEndian.PutUint32(buf[0:], 1)
 				binary.BigEndian.PutUint32(buf[4:], 2)
 				binary.BigEndian.PutUint32(buf[8:], 1)
 				binary.BigEndian.PutUint32(buf[12:], 0)
 				buf[16] = 5 // Non-zero NACK count
-				binary.BigEndian.PutUint16(buf[17:], 0)
-				binary.BigEndian.PutUint16(buf[19:], FlagACK)
-				binary.BigEndian.PutUint16(buf[21:], 0) // Option Size
+				buf[17] = 0
+				binary.BigEndian.PutUint16(buf[18:], FlagACK)
+				binary.BigEndian.PutUint16(buf[20:], 0) // Option Size
 				return buf
 			}(),
 			wantErr: true,
@@ -385,15 +386,15 @@ func TestPacketUnmarshal(t *testing.T) {
 		{
 			name: "large payload (MTU size)",
 			data: func() []byte {
-				buf := make([]byte, 23)
+				buf := make([]byte, 22)
 				binary.BigEndian.PutUint32(buf[0:], 1)
 				binary.BigEndian.PutUint32(buf[4:], 2)
 				binary.BigEndian.PutUint32(buf[8:], 1)
 				binary.BigEndian.PutUint32(buf[12:], 0)
 				buf[16] = 0
-				binary.BigEndian.PutUint16(buf[17:], 0)
-				binary.BigEndian.PutUint16(buf[19:], FlagACK)
-				binary.BigEndian.PutUint16(buf[21:], 0) // Option Size
+				buf[17] = 0
+				binary.BigEndian.PutUint16(buf[18:], FlagACK)
+				binary.BigEndian.PutUint16(buf[20:], 0) // Option Size
 
 				payload := make([]byte, DefaultMTU)
 				for i := range payload {
@@ -446,7 +447,7 @@ func TestPacketUnmarshalBigEndian(t *testing.T) {
 	// Construct packet with known big-endian values
 	// Use flags that don't include FlagDelayRequested (bit 8) or FlagMaxPacketSizeIncluded (bit 9)
 	// to avoid needing option data
-	data := make([]byte, 23)
+	data := make([]byte, 22)
 	// SendStreamID: 0x12345678
 	data[0], data[1], data[2], data[3] = 0x12, 0x34, 0x56, 0x78
 	// RecvStreamID: 0x9ABCDEF0
@@ -457,12 +458,12 @@ func TestPacketUnmarshalBigEndian(t *testing.T) {
 	data[12], data[13], data[14], data[15] = 0x76, 0x54, 0x32, 0x10
 	// NACKCount: 0
 	data[16] = 0
-	// ResendDelay: 0x1234
-	data[17], data[18] = 0x12, 0x34
+	// ResendDelay: 0x12 (1 byte now)
+	data[17] = 0x12
 	// Flags: 0x00FF (lower 8 bits set, avoiding bits 8 and 9)
-	data[19], data[20] = 0x00, 0xFF
+	data[18], data[19] = 0x00, 0xFF
 	// Option Size: 0
-	data[21], data[22] = 0x00, 0x00
+	data[20], data[21] = 0x00, 0x00
 
 	pkt := &Packet{}
 	err := pkt.Unmarshal(data)
@@ -472,7 +473,7 @@ func TestPacketUnmarshalBigEndian(t *testing.T) {
 	assert.Equal(t, uint32(0x9ABCDEF0), pkt.RecvStreamID, "RecvStreamID")
 	assert.Equal(t, uint32(0xFEDCBA98), pkt.SequenceNum, "SequenceNum")
 	assert.Equal(t, uint32(0x76543210), pkt.AckThrough, "AckThrough")
-	assert.Equal(t, uint16(0x1234), pkt.ResendDelay, "ResendDelay")
+	assert.Equal(t, uint8(0x12), pkt.ResendDelay, "ResendDelay")
 	assert.Equal(t, uint16(0x00FF), pkt.Flags, "Flags")
 }
 
@@ -533,7 +534,7 @@ func TestPacketRoundTrip(t *testing.T) {
 				SequenceNum:  0xFEDCBA98,
 				AckThrough:   0x76543210,
 				Flags:        FlagSYN | FlagACK | FlagFromIncluded,
-				ResendDelay:  1500,
+				ResendDelay:  150, // Changed from 1500 to fit uint8 (max 255)
 				Payload:      []byte("round trip test"),
 			},
 		},
@@ -590,28 +591,28 @@ func TestPacketUnmarshalEdgeCases(t *testing.T) {
 			errMsg:  "packet too short",
 		},
 		{
-			name:    "exactly 22 bytes (1 byte short)",
-			data:    make([]byte, 22),
+			name:    "exactly 21 bytes (1 byte short)",
+			data:    make([]byte, 21),
 			wantErr: true,
 			errMsg:  "packet too short",
 		},
 		{
-			name: "exactly 23 bytes (minimal valid)",
+			name: "exactly 22 bytes (minimal valid)",
 			data: func() []byte {
-				buf := make([]byte, 23)
-				binary.BigEndian.PutUint16(buf[19:], FlagSYN)
-				binary.BigEndian.PutUint16(buf[21:], 0) // Option Size
+				buf := make([]byte, 22)
+				binary.BigEndian.PutUint16(buf[18:], FlagSYN)
+				binary.BigEndian.PutUint16(buf[20:], 0) // Option Size
 				return buf
 			}(),
 			wantErr: false,
 		},
 		{
-			name: "24 bytes (23 + 1 byte payload)",
+			name: "23 bytes (22 + 1 byte payload)",
 			data: func() []byte {
-				buf := make([]byte, 24)
-				binary.BigEndian.PutUint16(buf[19:], FlagACK)
-				binary.BigEndian.PutUint16(buf[21:], 0) // Option Size
-				buf[23] = 0x42                          // 1 byte payload
+				buf := make([]byte, 23)
+				binary.BigEndian.PutUint16(buf[18:], FlagACK)
+				binary.BigEndian.PutUint16(buf[20:], 0) // Option Size
+				buf[22] = 0x42                          // 1 byte payload
 				return buf
 			}(),
 			wantErr: false,

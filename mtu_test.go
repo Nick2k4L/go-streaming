@@ -33,10 +33,10 @@ func TestMTUNegotiation_PacketMarshalWithMTU(t *testing.T) {
 		expectFlag    bool
 		expectedBytes int
 	}{
-		{"SYN with DefaultMTU", DefaultMTU, true, 23 + 2}, // header + MTU option
-		{"SYN with ECIESMTU", ECIESMTU, true, 23 + 2},
-		{"SYN with MinMTU", MinMTU, true, 23 + 2},
-		{"No MTU flag", 0, false, 23}, // header only
+		{"SYN with DefaultMTU", DefaultMTU, true, 22 + 2}, // header + MTU option
+		{"SYN with ECIESMTU", ECIESMTU, true, 22 + 2},
+		{"SYN with MinMTU", MinMTU, true, 22 + 2},
+		{"No MTU flag", 0, false, 22}, // header only
 	}
 
 	for _, tt := range tests {
@@ -58,12 +58,12 @@ func TestMTUNegotiation_PacketMarshalWithMTU(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectedBytes, len(data), "Packet size should match expected")
 
-			// Verify option size field
+			// Verify option size field (now at offset 20-21 after ResendDelay changed from 2 to 1 byte)
 			optionSize := uint16(0)
 			if tt.expectFlag {
 				optionSize = 2 // MaxPacketSize is 2 bytes
 			}
-			assert.Equal(t, optionSize, uint16(data[21])<<8|uint16(data[22]), "Option size should be correct")
+			assert.Equal(t, optionSize, uint16(data[20])<<8|uint16(data[21]), "Option size should be correct")
 		})
 	}
 }
