@@ -90,8 +90,9 @@ func TestJavaI2P_SessionCreation(t *testing.T) {
 					return
 				}
 				t.Logf("  ⚠ ProcessIO error: %v", err)
-				time.Sleep(100 * time.Millisecond)
 			}
+			// Always sleep to prevent spinning - ProcessIO returns immediately if no data
+			time.Sleep(50 * time.Millisecond)
 		}
 	}()
 	<-processIOStarted

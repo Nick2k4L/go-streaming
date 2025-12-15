@@ -262,7 +262,7 @@ func (sm *StreamManager) handleSessionStatus(
 	case go_i2cp.I2CP_SESSION_STATUS_CREATED:
 		log.Info().Msg("I2CP session created - streaming ready")
 		log.Debug().Uint16("sessionId", session.ID()).Msg("session ID assigned")
-		
+
 		// Signal session is ready
 		select {
 		case sm.sessionReady <- struct{}{}:
