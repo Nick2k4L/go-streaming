@@ -114,17 +114,30 @@ func NewStreamManager(client *go_i2cp.Client) (*StreamManager, error) {
 // Blocks until session is created or timeout expires.
 func (sm *StreamManager) StartSession(ctx context.Context) error {
 	log.Info().Msg("creating I2CP session")
+	log.Debug().Msg("sending CreateSession message to I2P router")
 
 	if err := sm.client.CreateSession(ctx, sm.session); err != nil {
+		log.Error().Err(err).Msg("CreateSession failed")
 		return fmt.Errorf("create session: %w", err)
 	}
+
+	log.Debug().Msg("CreateSession message sent, waiting for SessionCreated response")
+	log.Debug().Msg("waiting for OnStatus callback with SESSION_STATUS_CREATED")
 
 	// Wait for session to be ready (signaled by OnStatus callback)
 	select {
 	case <-sm.sessionReady:
 		log.Info().Msg("I2CP session ready")
+		log.Debug().Msg("OnStatus callback received SESSION_STATUS_CREATED")
 		return nil
 	case <-ctx.Done():
+		log.Error().
+			Err(ctx.Err()).
+			Msg("session creation timeout - SessionCreated response not received")
+		log.Debug().Msg("possible causes:")
+		log.Debug().Msg("  1. Router not responding to CreateSession")
+		log.Debug().Msg("  2. OnStatus callback not being invoked")
+		log.Debug().Msg("  3. ProcessIO loop not running")
 		return fmt.Errorf("session creation timeout: %w", ctx.Err())
 	}
 }
@@ -195,6 +208,13 @@ func (sm *StreamManager) handleIncomingMessage(
 	srcPort, destPort uint16,
 	payload *go_i2cp.Stream,
 ) {
+	log.Trace().
+		Uint8("protocol", protocol).
+		Uint16("srcPort", srcPort).
+		Uint16("destPort", destPort).
+		Int("payloadSize", payload.Len()).
+		Msg("handleIncomingMessage callback invoked")
+
 	// Only process I2P streaming protocol (6)
 	if protocol != 6 {
 		log.Trace().
@@ -234,19 +254,33 @@ func (sm *StreamManager) handleSessionStatus(
 	session *go_i2cp.Session,
 	status go_i2cp.SessionStatus,
 ) {
+	log.Debug().
+		Int("status", int(status)).
+		Msg("I2CP session status callback received")
+
 	switch status {
 	case go_i2cp.I2CP_SESSION_STATUS_CREATED:
 		log.Info().Msg("I2CP session created - streaming ready")
+		log.Debug().Uint16("sessionId", session.ID()).Msg("session ID assigned")
+		
 		// Signal session is ready
 		select {
 		case sm.sessionReady <- struct{}{}:
+			log.Debug().Msg("sessionReady signal sent successfully")
 		default:
-			// Already signaled
+			log.Debug().Msg("sessionReady signal already sent (channel full)")
 		}
 
 	case go_i2cp.I2CP_SESSION_STATUS_DESTROYED:
 		log.Info().Msg("I2CP session destroyed")
 		sm.closeAllConnections()
+
+	case go_i2cp.I2CP_SESSION_STATUS_REFUSED:
+		log.Warn().Msg("I2CP session refused by router")
+		log.Debug().Msg("possible causes:")
+		log.Debug().Msg("  1. Router rejecting session requests")
+		log.Debug().Msg("  2. Authentication required")
+		log.Debug().Msg("  3. Resource limits exceeded")
 
 	case go_i2cp.I2CP_SESSION_STATUS_INVALID:
 		log.Warn().Msg("I2CP session invalid")
@@ -255,9 +289,9 @@ func (sm *StreamManager) handleSessionStatus(
 		log.Debug().Msg("I2CP session updated")
 
 	default:
-		log.Debug().
+		log.Warn().
 			Int("status", int(status)).
-			Msg("unknown session status")
+			Msg("unknown session status received")
 	}
 }
 
