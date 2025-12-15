@@ -161,6 +161,11 @@ type StreamConn struct {
 	localMTU  uint16 // Our advertised MTU
 	remoteMTU uint16 // Remote peer's MTU (0 until negotiated)
 
+	// Out-of-order packet handling for selective ACK (NACK)
+	// Tracks packets received out of sequence to enable retransmission requests
+	outOfOrderPackets map[uint32]*Packet // Buffered packets received out of order
+	nackList          []uint32           // Sequence numbers we haven't received yet (for NACK field)
+
 	// Simple byte buffers for MVP
 	// Using github.com/armon/circbuf for receive buffer to avoid wraparound bugs
 	sendBuf []byte
@@ -1253,52 +1258,173 @@ func (s *StreamConn) handleAckLocked(pkt *Packet) error {
 	return nil
 }
 
-// handleDataLocked processes a data packet.
+// handleDataLocked processes a data packet with selective ACK (NACK) support.
 // Must be called with s.mu held.
 func (s *StreamConn) handleDataLocked(pkt *Packet) error {
-	// Validate sequence number (in-order only for MVP)
-	if pkt.SequenceNum != s.recvSeq {
-		log.Warn().
+	// Initialize out-of-order tracking on first use
+	if s.outOfOrderPackets == nil {
+		s.outOfOrderPackets = make(map[uint32]*Packet)
+	}
+
+	seq := pkt.SequenceNum
+
+	// Case 1: Exact sequence we need - process immediately
+	if seq == s.recvSeq {
+		// Write to receive buffer
+		n, err := s.recvBuf.Write(pkt.Payload)
+		if err != nil {
+			log.Error().Err(err).Msg("receive buffer full")
+			// TODO: Set choke flag
+			return fmt.Errorf("write to receive buffer: %w", err)
+		}
+
+		log.Debug().
+			Int("bytes", n).
+			Uint32("seq", s.recvSeq).
+			Msg("buffered payload")
+
+		// Increment sequence number
+		s.recvSeq++
+		s.totalBytesReceived += uint64(n)
+
+		// Remove this sequence from NACK list if present (we just received it)
+		s.removeFromNACKListLocked(seq)
+
+		// Now try to deliver any buffered packets that are now in sequence
+		s.deliverBufferedPacketsLocked()
+
+		// Update ackThrough if packet has ACK
+		if pkt.Flags&FlagACK != 0 && pkt.AckThrough > s.ackThrough {
+			s.ackThrough = pkt.AckThrough
+		}
+
+		// Wake up any blocked Read() calls
+		s.recvCond.Broadcast()
+
+		// Send ACK for this packet (with NACKs if any gaps exist)
+		if err := s.sendAckLocked(); err != nil {
+			log.Warn().
+				Err(err).
+				Msg("failed to send ACK")
+		}
+
+		return nil
+	}
+
+	// Case 2: Duplicate or old packet - ignore
+	if seq < s.recvSeq {
+		log.Debug().
 			Uint32("expected", s.recvSeq).
-			Uint32("got", pkt.SequenceNum).
-			Msg("sequence mismatch - dropping packet (MVP: no reordering)")
-		return fmt.Errorf("sequence mismatch")
+			Uint32("got", seq).
+			Msg("duplicate or old packet - ignoring")
+		return nil
 	}
 
-	// Write to receive buffer
-	n, err := s.recvBuf.Write(pkt.Payload)
-	if err != nil {
-		log.Error().Err(err).Msg("receive buffer full")
-		// TODO: Set choke flag
-		return fmt.Errorf("write to receive buffer: %w", err)
-	}
-
+	// Case 3: Future packet - buffer it and track the gap
 	log.Debug().
-		Int("bytes", n).
-		Uint32("seq", s.recvSeq).
-		Msg("buffered payload")
+		Uint32("expected", s.recvSeq).
+		Uint32("got", seq).
+		Msg("out-of-order packet - buffering")
 
-	// Increment sequence number by 1 per packet (not per byte)
-	// Per I2P streaming spec, sequence numbers count packets, not bytes
-	s.recvSeq++
-	s.totalBytesReceived += uint64(n)
+	// Store the packet
+	s.outOfOrderPackets[seq] = pkt
 
-	// Update ackThrough if packet has ACK
-	if pkt.Flags&FlagACK != 0 && pkt.AckThrough > s.ackThrough {
-		s.ackThrough = pkt.AckThrough
-	}
+	// Remove this sequence from NACK list since we just received it
+	s.removeFromNACKListLocked(seq)
 
-	// Wake up any blocked Read() calls
-	s.recvCond.Broadcast()
+	// Track all missing sequences between recvSeq and this packet
+	s.updateNACKListLocked(seq)
 
-	// Send ACK for this packet
+	// Send ACK with NACK list to request retransmission
 	if err := s.sendAckLocked(); err != nil {
 		log.Warn().
 			Err(err).
-			Msg("failed to send ACK")
+			Msg("failed to send ACK with NACKs")
 	}
 
 	return nil
+}
+
+// deliverBufferedPacketsLocked attempts to deliver contiguous buffered packets.
+// Must be called with s.mu held.
+func (s *StreamConn) deliverBufferedPacketsLocked() {
+	for {
+		// Check if we have the next expected packet buffered
+		pkt, exists := s.outOfOrderPackets[s.recvSeq]
+		if !exists {
+			// No more contiguous packets
+			break
+		}
+
+		// Deliver this packet
+		n, err := s.recvBuf.Write(pkt.Payload)
+		if err != nil {
+			log.Error().
+				Err(err).
+				Uint32("seq", s.recvSeq).
+				Msg("receive buffer full while delivering buffered packet")
+			// Can't deliver more packets now
+			break
+		}
+
+		log.Debug().
+			Int("bytes", n).
+			Uint32("seq", s.recvSeq).
+			Msg("delivered buffered packet")
+
+		// Update state
+		s.recvSeq++
+		s.totalBytesReceived += uint64(n)
+
+		// Remove from buffer
+		delete(s.outOfOrderPackets, pkt.SequenceNum)
+
+		// Remove this sequence from NACK list if present
+		s.removeFromNACKListLocked(pkt.SequenceNum)
+	}
+}
+
+// updateNACKListLocked updates the NACK list when receiving an out-of-order packet.
+// Adds all missing sequences between recvSeq and the received sequence.
+// Must be called with s.mu held.
+func (s *StreamConn) updateNACKListLocked(receivedSeq uint32) {
+	// Add all missing sequences between recvSeq and receivedSeq to NACK list
+	for seq := s.recvSeq; seq < receivedSeq; seq++ {
+		// Only add if we haven't already buffered this packet
+		if _, buffered := s.outOfOrderPackets[seq]; !buffered {
+			// Check if already in NACK list
+			found := false
+			for _, nack := range s.nackList {
+				if nack == seq {
+					found = true
+					break
+				}
+			}
+			if !found {
+				s.nackList = append(s.nackList, seq)
+				log.Debug().
+					Uint32("seq", seq).
+					Int("nackCount", len(s.nackList)).
+					Msg("added to NACK list")
+			}
+		}
+	}
+}
+
+// removeFromNACKListLocked removes a sequence number from the NACK list.
+// Must be called with s.mu held.
+func (s *StreamConn) removeFromNACKListLocked(seq uint32) {
+	for i, nack := range s.nackList {
+		if nack == seq {
+			// Remove from slice
+			s.nackList = append(s.nackList[:i], s.nackList[i+1:]...)
+			log.Debug().
+				Uint32("seq", seq).
+				Int("remaining", len(s.nackList)).
+				Msg("removed from NACK list")
+			return
+		}
+	}
 }
 
 // handleIncomingPacket is called by the StreamManager when a packet arrives for this connection.
@@ -1327,7 +1453,7 @@ func (s *StreamConn) handleIncomingPacket(pkt *Packet) error {
 	}
 }
 
-// sendAckLocked sends an ACK packet.
+// sendAckLocked sends an ACK packet with optional NACKs for selective retransmission.
 // Must be called with s.mu held.
 func (s *StreamConn) sendAckLocked() error {
 	pkt := &Packet{
@@ -1337,6 +1463,22 @@ func (s *StreamConn) sendAckLocked() error {
 		AckThrough:    s.recvSeq - 1,
 		Flags:         FlagACK,
 		OptionalDelay: 0, // Request immediate ACK (MVP: no delay optimization)
+	}
+
+	// Include NACKs if we have any gaps in received sequences
+	// Limit to 255 NACKs per packet as per I2P streaming spec
+	if len(s.nackList) > 0 {
+		maxNacks := 255
+		if len(s.nackList) < maxNacks {
+			maxNacks = len(s.nackList)
+		}
+
+		pkt.NACKs = make([]uint32, maxNacks)
+		copy(pkt.NACKs, s.nackList[:maxNacks])
+
+		log.Debug().
+			Int("nackCount", len(pkt.NACKs)).
+			Msg("including NACKs in ACK packet")
 	}
 
 	return s.sendPacketLocked(pkt)

@@ -200,7 +200,7 @@ func TestHandleIncomingPacket_ValidSequence(t *testing.T) {
 	assert.Equal(t, uint64(len(pkt.Payload)), totalBytesReceived)
 }
 
-// TestHandleIncomingPacket_InvalidSequence tests dropping out-of-order packets
+// TestHandleIncomingPacket_InvalidSequence tests buffering out-of-order packets
 func TestHandleIncomingPacket_InvalidSequence(t *testing.T) {
 	conn := createTestConnection(t)
 	defer conn.Close()
@@ -209,11 +209,11 @@ func TestHandleIncomingPacket_InvalidSequence(t *testing.T) {
 	expectedSeq := conn.recvSeq
 	conn.mu.Unlock()
 
-	// Send packet with wrong sequence number
+	// Send packet with wrong sequence number (future packet)
 	pkt := &Packet{
 		SendStreamID: uint32(conn.remotePort),
 		RecvStreamID: uint32(conn.localPort),
-		SequenceNum:  expectedSeq + 100, // Wrong sequence
+		SequenceNum:  expectedSeq + 5, // Future packet
 		AckThrough:   0,
 		Flags:        FlagACK,
 		Payload:      []byte("test data"),
@@ -221,13 +221,19 @@ func TestHandleIncomingPacket_InvalidSequence(t *testing.T) {
 
 	// Call processPacket directly (unit test - no receiveLoop)
 	err := conn.processPacket(pkt)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "sequence mismatch")
+	// No error expected - packet should be buffered
+	assert.NoError(t, err)
 
-	// Verify no data in receive buffer
+	// Verify packet was buffered (not delivered yet)
 	conn.mu.Lock()
-	assert.Equal(t, int64(0), conn.recvBuf.TotalWritten())
-	assert.Equal(t, expectedSeq, conn.recvSeq) // Sequence unchanged
+	assert.Equal(t, int64(0), conn.recvBuf.TotalWritten(), "no data delivered until gap filled")
+	assert.Equal(t, expectedSeq, conn.recvSeq, "sequence unchanged until gap filled")
+	assert.Equal(t, 1, len(conn.outOfOrderPackets), "packet should be buffered")
+	_, buffered := conn.outOfOrderPackets[expectedSeq+5]
+	assert.True(t, buffered, "future packet should be in buffer")
+
+	// Verify NACK list contains missing sequences
+	assert.Greater(t, len(conn.nackList), 0, "should have NACKs for missing packets")
 	conn.mu.Unlock()
 }
 
