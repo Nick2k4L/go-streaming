@@ -162,10 +162,11 @@ type StreamConn struct {
 
 	// Choking mechanism per I2P streaming spec
 	// optDelay field: 0-60000ms = advisory delay, >60000 = choked
-	optDelay        uint16 // Optional delay field from last packet
-	choked          bool   // Are we being choked by remote peer (sender-side)?
-	sendingChoke    bool   // Are we sending choke signals to remote peer (receiver-side)?
-	lastBufferCheck int64  // Last time we checked buffer usage (TotalWritten value)
+	optDelay        uint16    // Optional delay field from last packet
+	choked          bool      // Are we being choked by remote peer (sender-side)?
+	chokedUntil     time.Time // When to resume sending after being choked
+	sendingChoke    bool      // Are we sending choke signals to remote peer (receiver-side)?
+	lastBufferCheck int64     // Last time we checked buffer usage (TotalWritten value)
 
 	// MTU negotiation
 	localMTU  uint16 // Our advertised MTU
@@ -1282,13 +1283,26 @@ func (s *StreamConn) handleAckLocked(pkt *Packet) error {
 	}
 
 	// Handle optional delay (choking mechanism)
-	if pkt.OptionalDelay > 60000 {
-		s.choked = true
-		log.Debug().
-			Uint16("delay", pkt.OptionalDelay).
-			Msg("peer is choked")
-	} else {
-		s.choked = false
+	// Per I2P streaming spec: OptionalDelay > 60000 indicates choked state
+	if pkt.Flags&FlagDelayRequested != 0 {
+		if pkt.OptionalDelay > 60000 {
+			// Peer is choked - pause sending for a short time
+			s.choked = true
+			s.chokedUntil = time.Now().Add(time.Second)
+			log.Debug().
+				Uint16("delay", pkt.OptionalDelay).
+				Time("chokedUntil", s.chokedUntil).
+				Msg("peer is choked - pausing transmission")
+		} else {
+			// Peer is not choked - clear choke state
+			s.choked = false
+			s.chokedUntil = time.Time{}
+			if pkt.OptionalDelay > 0 {
+				log.Debug().
+					Uint16("delay", pkt.OptionalDelay).
+					Msg("peer requests delay")
+			}
+		}
 	}
 
 	return nil
