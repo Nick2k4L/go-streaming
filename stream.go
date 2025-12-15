@@ -903,6 +903,29 @@ func (s *StreamConn) Write(data []byte) (int, error) {
 		return 0, fmt.Errorf("connection not established (state: %s)", s.state)
 	}
 
+	// Respect choke signals from peer
+	// If peer is choked and we're still in the choke period, wait
+	if s.choked && time.Now().Before(s.chokedUntil) {
+		// Calculate how long to wait
+		waitDuration := time.Until(s.chokedUntil)
+		log.Debug().
+			Dur("waitDuration", waitDuration).
+			Msg("peer is choked - waiting before sending")
+
+		// Release lock while waiting to allow receiving unchoke signals
+		s.mu.Unlock()
+		time.Sleep(waitDuration)
+		s.mu.Lock()
+
+		// Re-check state after waiting
+		if s.closed {
+			return 0, fmt.Errorf("connection closed")
+		}
+		if s.state != StateEstablished {
+			return 0, fmt.Errorf("connection not established (state: %s)", s.state)
+		}
+	}
+
 	total := len(data)
 	mtu := int(s.getNegotiatedMTULocked())
 
