@@ -31,7 +31,27 @@ const (
 	FlagDelayRequested uint16 = 1 << 8
 	// FlagMaxPacketSizeIncluded indicates MTU is present (bit 7)
 	FlagMaxPacketSizeIncluded uint16 = 1 << 9
+	// FlagOfflineSignature indicates offline signature (LS2) is present
+	FlagOfflineSignature uint16 = 1 << 10
 )
+
+// OfflineSig represents an I2P LS2 offline signature block.
+// Offline signatures allow a destination to delegate signing authority to a transient key,
+// which is useful for LeaseSet2 (LS2) destinations where the signing key may be offline.
+//
+// Structure per I2P specification:
+//   - Expires: Unix timestamp (4 bytes) when the offline signature expires
+//   - TransientSigType: Signature type of the transient key (2 bytes)
+//   - TransientPublicKey: Public key for the transient signing key (variable length)
+//   - DestSignature: Signature by the destination's signing key (variable length)
+//
+// The destination signs the transient key to prove it authorized the delegation.
+type OfflineSig struct {
+	Expires            uint32 // Timestamp (seconds since epoch)
+	TransientSigType   uint16 // Signature type of transient key
+	TransientPublicKey []byte // Variable length based on type
+	DestSignature      []byte // Signature by destination key
+}
 
 // Packet represents an I2P streaming protocol packet.
 // Per spec, packets are variable length with optional fields.
@@ -55,8 +75,9 @@ type Packet struct {
 	MaxPacketSize uint16   // MTU - maximum payload size in bytes (sent with SYN)
 
 	// Authentication fields (presence indicated by FlagFromIncluded and FlagSignatureIncluded)
-	FromDestination *go_i2cp.Destination // Source destination when FlagFromIncluded is set (387+ bytes)
-	Signature       []byte               // Packet signature when FlagSignatureIncluded is set (variable length based on key type)
+	FromDestination  *go_i2cp.Destination // Source destination when FlagFromIncluded is set (387+ bytes)
+	Signature        []byte               // Packet signature when FlagSignatureIncluded is set (variable length based on key type)
+	OfflineSignature *OfflineSig          // Offline signature (LS2) when FlagOfflineSignature is set
 
 	// Payload
 	Payload []byte
@@ -119,6 +140,18 @@ func (p *Packet) Marshal() ([]byte, error) {
 			return nil, fmt.Errorf("FlagSignatureIncluded set but cannot determine signature length")
 		}
 		optionSize += uint16(sigLen)
+	}
+
+	// Calculate offline signature size (if included)
+	if p.Flags&FlagOfflineSignature != 0 {
+		if p.OfflineSignature == nil {
+			return nil, fmt.Errorf("FlagOfflineSignature set but OfflineSignature is nil")
+		}
+		// Offline signature structure: 4 (expires) + 2 (type) + key length + signature length
+		transientKeyLen := getPublicKeyLength(p.OfflineSignature.TransientSigType)
+		destSigLen := getSignatureLength(p.FromDestination)
+		offlineSigSize := 4 + 2 + transientKeyLen + destSigLen
+		optionSize += uint16(offlineSigSize)
 	}
 
 	// Estimate buffer size: header (22 bytes) + options + payload
@@ -184,6 +217,35 @@ func (p *Packet) Marshal() ([]byte, error) {
 			// Reserve space for signature (caller will fill it later)
 			buf = append(buf, make([]byte, sigLen)...)
 		}
+	}
+
+	// Write offline signature (if included)
+	if p.Flags&FlagOfflineSignature != 0 {
+		// Write expires timestamp (4 bytes)
+		var tmp4 [4]byte
+		binary.BigEndian.PutUint32(tmp4[:], p.OfflineSignature.Expires)
+		buf = append(buf, tmp4[:]...)
+
+		// Write transient signature type (2 bytes)
+		var tmp2 [2]byte
+		binary.BigEndian.PutUint16(tmp2[:], p.OfflineSignature.TransientSigType)
+		buf = append(buf, tmp2[:]...)
+
+		// Write transient public key
+		transientKeyLen := getPublicKeyLength(p.OfflineSignature.TransientSigType)
+		if len(p.OfflineSignature.TransientPublicKey) != transientKeyLen {
+			return nil, fmt.Errorf("transient public key length mismatch: expected %d, got %d",
+				transientKeyLen, len(p.OfflineSignature.TransientPublicKey))
+		}
+		buf = append(buf, p.OfflineSignature.TransientPublicKey...)
+
+		// Write destination signature
+		destSigLen := getSignatureLength(p.FromDestination)
+		if len(p.OfflineSignature.DestSignature) != destSigLen {
+			return nil, fmt.Errorf("offline signature dest signature length mismatch: expected %d, got %d",
+				destSigLen, len(p.OfflineSignature.DestSignature))
+		}
+		buf = append(buf, p.OfflineSignature.DestSignature...)
 	}
 
 	// Payload
@@ -319,6 +381,51 @@ func (p *Packet) Unmarshal(data []byte) error {
 		p.Signature = make([]byte, sigLen)
 		copy(p.Signature, data[offset:offset+sigLen])
 		offset += sigLen
+	}
+
+	// Parse offline signature (LS2) if present
+	if p.Flags&FlagOfflineSignature != 0 {
+		if offset+6 > optionsEnd {
+			return fmt.Errorf("option data too short for offline signature header")
+		}
+
+		offsig := &OfflineSig{}
+
+		// Read expires timestamp (4 bytes)
+		offsig.Expires = binary.BigEndian.Uint32(data[offset:])
+		offset += 4
+
+		// Read transient signature type (2 bytes)
+		offsig.TransientSigType = binary.BigEndian.Uint16(data[offset:])
+		offset += 2
+
+		// Read transient public key (variable length based on type)
+		transientKeyLen := getPublicKeyLength(offsig.TransientSigType)
+		if transientKeyLen == 0 {
+			return fmt.Errorf("cannot determine transient public key length for type %d", offsig.TransientSigType)
+		}
+		if offset+transientKeyLen > optionsEnd {
+			return fmt.Errorf("option data too short for transient public key: need %d bytes, have %d",
+				transientKeyLen, optionsEnd-offset)
+		}
+		offsig.TransientPublicKey = make([]byte, transientKeyLen)
+		copy(offsig.TransientPublicKey, data[offset:offset+transientKeyLen])
+		offset += transientKeyLen
+
+		// Read destination signature (variable length based on dest type)
+		destSigLen := getSignatureLength(p.FromDestination)
+		if destSigLen == 0 {
+			return fmt.Errorf("cannot determine offline signature dest signature length (no FROM destination)")
+		}
+		if offset+destSigLen > optionsEnd {
+			return fmt.Errorf("option data too short for offline signature dest signature: need %d bytes, have %d",
+				destSigLen, optionsEnd-offset)
+		}
+		offsig.DestSignature = make([]byte, destSigLen)
+		copy(offsig.DestSignature, data[offset:offset+destSigLen])
+		offset += destSigLen
+
+		p.OfflineSignature = offsig
 	}
 
 	// Skip any unrecognized option data
@@ -521,6 +628,46 @@ func getSignatureLength(dest *go_i2cp.Destination) int {
 		// Default to Ed25519 size for unknown types
 		// This is the most common modern signature type
 		return 64
+	}
+}
+
+// getPublicKeyLength returns the public key length in bytes for a given signature type.
+//
+// I2P signature types use different public key sizes:
+//   - DSA: 128 bytes
+//   - ECDSA P-256: 64 bytes (32 bytes x + 32 bytes y)
+//   - ECDSA P-384: 96 bytes (48 bytes x + 48 bytes y)
+//   - ECDSA P-521: 132 bytes (66 bytes x + 66 bytes y)
+//   - RSA 2048: 256 bytes
+//   - RSA 3072: 384 bytes
+//   - RSA 4096: 512 bytes
+//   - Ed25519: 32 bytes
+//
+// Design rationale:
+//   - Required for parsing offline signatures (LS2) where transient key is variable length
+//   - Maps signature type constants to corresponding public key sizes
+//   - Returns 0 for unknown types (caller should handle error)
+func getPublicKeyLength(sigType uint16) int {
+	switch int(sigType) {
+	case SignatureTypeDSA_SHA1:
+		return 128
+	case SignatureTypeECDSA_SHA256_P256:
+		return 64
+	case SignatureTypeECDSA_SHA384_P384:
+		return 96
+	case SignatureTypeECDSA_SHA512_P521:
+		return 132
+	case SignatureTypeRSA_SHA256_2048:
+		return 256
+	case SignatureTypeRSA_SHA384_3072:
+		return 384
+	case SignatureTypeRSA_SHA512_4096:
+		return 512
+	case SignatureTypeEd25519, SignatureTypeEd25519ph:
+		return 32
+	default:
+		// Unknown signature type
+		return 0
 	}
 }
 
