@@ -8,16 +8,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestStreamConnForRetransmit creates a minimal StreamConn for testing retransmission.
-func newTestStreamConnForRetransmit() *StreamConn {
+// newTestStreamConnForRetransmit creates a StreamConn for testing retransmission with real I2CP.
+func newTestStreamConnForRetransmit(t *testing.T) *StreamConn {
+	i2cp := RequireI2CP(t)
 	recvBuf, _ := circbuf.NewBuffer(1024)
 	s := &StreamConn{
+		session:           i2cp.Manager.session,
+		dest:              i2cp.Manager.Destination(),
 		sendSeq:           1,
 		recvBuf:           recvBuf,
 		outOfOrderPackets: make(map[uint32]*Packet),
 		nackList:          []uint32{},
 	}
 	s.recvCond = sync.NewCond(&s.mu)
+	s.sendCond = sync.NewCond(&s.mu)
 	return s
 }
 
@@ -42,7 +46,7 @@ func TestSentPacketTracking(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := newTestStreamConnForRetransmit()
+			s := newTestStreamConnForRetransmit(t)
 
 			// Create packet with or without payload
 			pkt := &Packet{
@@ -79,7 +83,7 @@ func TestSentPacketTracking(t *testing.T) {
 
 // TestNACKRetransmission verifies that packets are retransmitted when NACKs are received.
 func TestNACKRetransmission(t *testing.T) {
-	s := newTestStreamConnForRetransmit()
+	s := newTestStreamConnForRetransmit(t)
 
 	// Send a data packet that will be tracked
 	pkt := &Packet{
@@ -116,7 +120,7 @@ func TestNACKRetransmission(t *testing.T) {
 
 // TestMultipleRetransmissions verifies retry count increments correctly.
 func TestMultipleRetransmissions(t *testing.T) {
-	s := newTestStreamConnForRetransmit()
+	s := newTestStreamConnForRetransmit(t)
 
 	// Send and track a packet
 	pkt := &Packet{
@@ -143,7 +147,7 @@ func TestMultipleRetransmissions(t *testing.T) {
 
 // TestAckedPacketCleanup verifies that ACKed packets are removed from tracking.
 func TestAckedPacketCleanup(t *testing.T) {
-	s := newTestStreamConnForRetransmit()
+	s := newTestStreamConnForRetransmit(t)
 
 	// Send several packets
 	for seq := uint32(1); seq <= 5; seq++ {
@@ -191,7 +195,7 @@ func TestAckedPacketCleanup(t *testing.T) {
 
 // TestCleanupWithNoTrackedPackets verifies cleanup handles empty state gracefully.
 func TestCleanupWithNoTrackedPackets(t *testing.T) {
-	s := newTestStreamConnForRetransmit()
+	s := newTestStreamConnForRetransmit(t)
 
 	// Call cleanup with no tracked packets
 	s.mu.Lock()
@@ -203,7 +207,7 @@ func TestCleanupWithNoTrackedPackets(t *testing.T) {
 
 // TestRetransmitMissingPacket verifies handling of NACK for non-existent packet.
 func TestRetransmitMissingPacket(t *testing.T) {
-	s := newTestStreamConnForRetransmit()
+	s := newTestStreamConnForRetransmit(t)
 
 	// Try to retransmit a packet that was never sent
 	s.mu.Lock()
@@ -216,7 +220,7 @@ func TestRetransmitMissingPacket(t *testing.T) {
 
 // TestMultipleNACKsInOneACK verifies handling of multiple NACKs in a single ACK packet.
 func TestMultipleNACKsInOneACK(t *testing.T) {
-	s := newTestStreamConnForRetransmit()
+	s := newTestStreamConnForRetransmit(t)
 
 	// Send packets 10, 11, 12
 	for seq := uint32(10); seq <= 12; seq++ {
@@ -249,7 +253,7 @@ func TestMultipleNACKsInOneACK(t *testing.T) {
 
 // TestNACKAfterPartialACK verifies NACK handling when some packets are ACKed.
 func TestNACKAfterPartialACK(t *testing.T) {
-	s := newTestStreamConnForRetransmit()
+	s := newTestStreamConnForRetransmit(t)
 
 	// Send packets 1-5
 	for seq := uint32(1); seq <= 5; seq++ {
@@ -287,7 +291,7 @@ func TestNACKAfterPartialACK(t *testing.T) {
 
 // TestSentPacketDataIntegrity verifies that stored packet data can be retransmitted.
 func TestSentPacketDataIntegrity(t *testing.T) {
-	s := newTestStreamConnForRetransmit()
+	s := newTestStreamConnForRetransmit(t)
 
 	payload := []byte("important data")
 	pkt := &Packet{

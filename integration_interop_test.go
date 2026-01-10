@@ -185,10 +185,7 @@ func TestJavaI2P_ListenerCreation(t *testing.T) {
 	require.NoError(t, err)
 	defer manager.Close()
 
-	err = manager.StartSession(context.Background())
-	require.NoError(t, err)
-
-	// Start ProcessIO
+	// Start ProcessIO BEFORE StartSession (critical ordering!)
 	go func() {
 		for {
 			if err := client.ProcessIO(context.Background()); err != nil {
@@ -199,6 +196,11 @@ func TestJavaI2P_ListenerCreation(t *testing.T) {
 			}
 		}
 	}()
+
+	sessionCtx, sessionCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer sessionCancel()
+	err = manager.StartSession(sessionCtx)
+	require.NoError(t, err)
 
 	// Create streaming listener
 	t.Log("creating streaming listener on port 8080...")
@@ -234,7 +236,21 @@ func TestJavaI2P_PacketFormat(t *testing.T) {
 	require.NoError(t, err)
 	defer manager.Close()
 
-	err = manager.StartSession(context.Background())
+	// Start ProcessIO BEFORE StartSession (critical ordering!)
+	go func() {
+		for {
+			if err := client.ProcessIO(context.Background()); err != nil {
+				if err == go_i2cp.ErrClientClosed {
+					return
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}()
+
+	sessionCtx, sessionCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer sessionCancel()
+	err = manager.StartSession(sessionCtx)
 	require.NoError(t, err)
 
 	// Create a test SYN packet (without signature for simplicity)

@@ -9,9 +9,14 @@ import (
 )
 
 // newTestStreamConnForChoke creates a minimal StreamConn for testing choke signals.
-func newTestStreamConnForChoke(bufferSize int) *StreamConn {
+// Uses real I2CP session to ensure packets can be sent.
+func newTestStreamConnForChoke(t *testing.T, bufferSize int) *StreamConn {
+	i2cp := RequireI2CP(t)
+
 	recvBuf, _ := circbuf.NewBuffer(int64(bufferSize))
 	s := &StreamConn{
+		session:           i2cp.Manager.session,
+		dest:              i2cp.Manager.Destination(),
 		localStreamID:     100,
 		remoteStreamID:    200,
 		sendSeq:           1,
@@ -21,6 +26,7 @@ func newTestStreamConnForChoke(bufferSize int) *StreamConn {
 		nackList:          []uint32{},
 	}
 	s.recvCond = sync.NewCond(&s.mu)
+	s.sendCond = sync.NewCond(&s.mu)
 	return s
 }
 
@@ -65,7 +71,7 @@ func TestChokeSignalGeneration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := newTestStreamConnForChoke(tt.bufferSize)
+			s := newTestStreamConnForChoke(t, tt.bufferSize)
 
 			// Create packet with test data
 			pkt := &Packet{
@@ -91,7 +97,7 @@ func TestChokeSignalGeneration(t *testing.T) {
 func TestUnchokeSignalGeneration(t *testing.T) {
 	// Create connection with small buffer
 	bufferSize := 1000
-	s := newTestStreamConnForChoke(bufferSize)
+	s := newTestStreamConnForChoke(t, bufferSize)
 
 	// Fill buffer to trigger choke (85% usage)
 	pkt1 := &Packet{
@@ -134,7 +140,7 @@ func TestUnchokeSignalGeneration(t *testing.T) {
 
 // TestChokeSignalPacketFormat verifies choke signal packet structure.
 func TestChokeSignalPacketFormat(t *testing.T) {
-	s := newTestStreamConnForChoke(1000)
+	s := newTestStreamConnForChoke(t, 1000)
 
 	s.mu.Lock()
 	err := s.sendChokeSignalLocked()
@@ -152,7 +158,7 @@ func TestChokeSignalPacketFormat(t *testing.T) {
 
 // TestUnchokeSignalPacketFormat verifies unchoke signal packet structure.
 func TestUnchokeSignalPacketFormat(t *testing.T) {
-	s := newTestStreamConnForChoke(1000)
+	s := newTestStreamConnForChoke(t, 1000)
 
 	// Set initial choke state
 	s.mu.Lock()
@@ -168,7 +174,7 @@ func TestUnchokeSignalPacketFormat(t *testing.T) {
 // TestChokeHysteresis verifies hysteresis prevents choke signal flapping.
 func TestChokeHysteresis(t *testing.T) {
 	bufferSize := 1000
-	s := newTestStreamConnForChoke(bufferSize)
+	s := newTestStreamConnForChoke(t, bufferSize)
 
 	// Fill to 85% - triggers choke
 	pkt1 := &Packet{
@@ -224,7 +230,7 @@ func TestChokeHysteresis(t *testing.T) {
 
 // TestChokeWithNACKs verifies choke signals include NACK list.
 func TestChokeWithNACKs(t *testing.T) {
-	s := newTestStreamConnForChoke(1000)
+	s := newTestStreamConnForChoke(t, 1000)
 
 	// Add some NACKs
 	s.mu.Lock()
@@ -241,7 +247,7 @@ func TestChokeWithNACKs(t *testing.T) {
 // TestChokeSignalNotSentWhenAlreadyChoking verifies idempotence.
 func TestChokeSignalNotSentWhenAlreadyChoking(t *testing.T) {
 	bufferSize := 1000
-	s := newTestStreamConnForChoke(bufferSize)
+	s := newTestStreamConnForChoke(t, bufferSize)
 
 	// First packet fills to 85% - sends choke
 	pkt1 := &Packet{
@@ -277,7 +283,7 @@ func TestChokeSignalNotSentWhenAlreadyChoking(t *testing.T) {
 func TestBufferOverflowWithChoke(t *testing.T) {
 	// Small buffer for easy testing
 	bufferSize := 100
-	s := newTestStreamConnForChoke(bufferSize)
+	s := newTestStreamConnForChoke(t, bufferSize)
 
 	// Fill buffer to 85% - triggers choke
 	pkt1 := &Packet{
@@ -306,7 +312,7 @@ func TestBufferOverflowWithChoke(t *testing.T) {
 
 // TestLastBufferCheckTracking verifies buffer check optimization.
 func TestLastBufferCheckTracking(t *testing.T) {
-	s := newTestStreamConnForChoke(1000)
+	s := newTestStreamConnForChoke(t, 1000)
 
 	// First packet - sets lastBufferCheck
 	pkt1 := &Packet{

@@ -1,6 +1,3 @@
-//go:build system
-// +build system
-
 // System integration tests for go-streaming
 //
 // These tests require a FULLY OPERATIONAL I2P router with I2CP enabled on localhost:7654.

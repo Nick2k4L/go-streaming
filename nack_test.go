@@ -273,10 +273,13 @@ func TestNACKListUpdates(t *testing.T) {
 // TestNACKInclusionInACKPackets verifies that NACKs are included in ACK packets
 // when there are missing sequences.
 func TestNACKInclusionInACKPackets(t *testing.T) {
+	i2cp := RequireI2CP(t)
 	recvBuf, err := circbuf.NewBuffer(1024)
 	require.NoError(t, err)
 
 	s := &StreamConn{
+		session:           i2cp.Manager.session,
+		dest:              i2cp.Manager.Destination(),
 		recvSeq:           100,
 		recvBuf:           recvBuf,
 		outOfOrderPackets: make(map[uint32]*Packet),
@@ -284,8 +287,9 @@ func TestNACKInclusionInACKPackets(t *testing.T) {
 		localStreamID:     1,
 		remoteStreamID:    2,
 		sendSeq:           50,
-		session:           nil, // No actual sending in test
 	}
+	s.recvCond = sync.NewCond(&s.mu)
+	s.sendCond = sync.NewCond(&s.mu)
 
 	// Add some NACKs manually
 	s.nackList = []uint32{100, 101, 102}
@@ -301,10 +305,13 @@ func TestNACKInclusionInACKPackets(t *testing.T) {
 
 // TestNACKLimit255 verifies that no more than 255 NACKs are included per packet.
 func TestNACKLimit255(t *testing.T) {
+	i2cp := RequireI2CP(t)
 	recvBuf, err := circbuf.NewBuffer(1024)
 	require.NoError(t, err)
 
 	s := &StreamConn{
+		session:           i2cp.Manager.session,
+		dest:              i2cp.Manager.Destination(),
 		recvSeq:           100,
 		recvBuf:           recvBuf,
 		outOfOrderPackets: make(map[uint32]*Packet),
@@ -312,8 +319,9 @@ func TestNACKLimit255(t *testing.T) {
 		localStreamID:     1,
 		remoteStreamID:    2,
 		sendSeq:           50,
-		session:           nil,
 	}
+	s.recvCond = sync.NewCond(&s.mu)
+	s.sendCond = sync.NewCond(&s.mu)
 
 	// Add 300 NACKs
 	for i := uint32(0); i < 300; i++ {
