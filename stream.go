@@ -1860,14 +1860,31 @@ func (s *StreamConn) deliverBufferedPacketsLocked() {
 	}
 }
 
+// MaxNACKs is the maximum number of NACKs that can be stored and sent per packet.
+// Per I2P streaming specification, NACK count is limited to 255.
+const MaxNACKs = 255
+
 // updateNACKListLocked updates the NACK list when receiving an out-of-order packet.
 // Adds all missing sequences between recvSeq and the received sequence.
+// The NACK list is bounded to MaxNACKs (255) entries to prevent unbounded memory growth
+// and because only 255 NACKs can be sent per packet per I2P streaming spec.
+// Prioritizes lower sequence numbers (earlier gaps) to avoid head-of-line blocking.
 // Must be called with s.mu held.
 func (s *StreamConn) updateNACKListLocked(receivedSeq uint32) {
 	// Add all missing sequences between recvSeq and receivedSeq to NACK list
 	// Use wrap-around safe iteration: calculate distance and iterate that many times
 	// This correctly handles sequence wrap-around (e.g., recvSeq=0xFFFFFFFE, receivedSeq=0x00000002)
 	for seq := s.recvSeq; seqLessThan(seq, receivedSeq); seq++ {
+		// Enforce maximum NACK list size to prevent unbounded memory growth
+		// Prioritize earlier sequence numbers (already in list) over later ones
+		if len(s.nackList) >= MaxNACKs {
+			log.Debug().
+				Int("nackCount", len(s.nackList)).
+				Uint32("droppedSeq", seq).
+				Msg("NACK list at capacity, dropping new entry")
+			break // Stop adding - we've hit the limit
+		}
+
 		// Only add if we haven't already buffered this packet
 		if _, buffered := s.outOfOrderPackets[seq]; !buffered {
 			// Check if already in NACK list
@@ -2006,9 +2023,9 @@ func (s *StreamConn) sendAckLocked() error {
 	}
 
 	// Include NACKs if we have any gaps in received sequences
-	// Limit to 255 NACKs per packet as per I2P streaming spec
+	// Limit to MaxNACKs per packet as per I2P streaming spec
 	if len(s.nackList) > 0 {
-		maxNacks := 255
+		maxNacks := MaxNACKs
 		if len(s.nackList) < maxNacks {
 			maxNacks = len(s.nackList)
 		}
@@ -2040,7 +2057,7 @@ func (s *StreamConn) sendChokeSignalLocked() error {
 
 	// Include NACKs if we have any gaps (even when choked, request missing packets)
 	if len(s.nackList) > 0 {
-		maxNacks := 255
+		maxNacks := MaxNACKs
 		if len(s.nackList) < maxNacks {
 			maxNacks = len(s.nackList)
 		}
@@ -2072,7 +2089,7 @@ func (s *StreamConn) sendUnchokeSignalLocked() error {
 
 	// Include NACKs if we have any gaps
 	if len(s.nackList) > 0 {
-		maxNacks := 255
+		maxNacks := MaxNACKs
 		if len(s.nackList) < maxNacks {
 			maxNacks = len(s.nackList)
 		}
