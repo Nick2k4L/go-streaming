@@ -89,6 +89,42 @@ func hashDestination(dest *go_i2cp.Destination) ([]byte, error) {
 	return hash[:], nil
 }
 
+// seqLessThan compares two sequence numbers with wrap-around handling.
+// Uses RFC 1323 / TCP semantics: a < b iff (a - b) interpreted as signed is negative.
+// This correctly handles the case where sequence numbers wrap from 0xFFFFFFFF to 0.
+// For example: seqLessThan(0xFFFFFFFE, 0x00000001) returns true (because 0xFFFFFFFE
+// is "before" 0x00000001 in the sequence space after wrap-around).
+func seqLessThan(a, b uint32) bool {
+	// Cast difference to int32 for signed comparison
+	// If (a - b) as signed int32 is negative, then a < b in sequence space
+	return int32(a-b) < 0
+}
+
+// seqLessThanOrEqual compares two sequence numbers with wrap-around handling.
+// Returns true if a <= b in sequence number space.
+func seqLessThanOrEqual(a, b uint32) bool {
+	return a == b || seqLessThan(a, b)
+}
+
+// seqGreaterThan compares two sequence numbers with wrap-around handling.
+// Returns true if a > b in sequence number space.
+func seqGreaterThan(a, b uint32) bool {
+	return int32(a-b) > 0
+}
+
+// seqGreaterThanOrEqual compares two sequence numbers with wrap-around handling.
+// Returns true if a >= b in sequence number space.
+func seqGreaterThanOrEqual(a, b uint32) bool {
+	return a == b || seqGreaterThan(a, b)
+}
+
+// seqDiff returns the distance between two sequence numbers.
+// Returns positive value representing how many sequence numbers b is ahead of a.
+// Handles wrap-around correctly.
+func seqDiff(a, b uint32) uint32 {
+	return b - a
+}
+
 // I2PAddr implements the net.Addr interface for I2P destinations.
 // This allows StreamConn to be used anywhere net.Conn is expected.
 type I2PAddr struct {
@@ -196,8 +232,9 @@ type StreamConn struct {
 	ctx      context.Context    // Context for cancellation
 	cancel   context.CancelFunc // Cancel function
 
-	// Synchronization primitives for blocking reads
+	// Synchronization primitives for blocking reads/writes
 	recvCond *sync.Cond // Condition variable for Read() blocking
+	sendCond *sync.Cond // Condition variable for Write() flow control blocking
 
 	// Deadlines for net.Conn interface
 	readDeadline  time.Time
@@ -371,6 +408,7 @@ func createConnectionStruct(session *go_i2cp.Session, manager *StreamManager, de
 		remoteMTU:      0, // Will be negotiated
 	}
 	conn.recvCond = sync.NewCond(&conn.mu)
+	conn.sendCond = sync.NewCond(&conn.mu)
 
 	log.Info().
 		Uint16("localPort", localPort).
@@ -848,6 +886,7 @@ func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, re
 		remoteMTU:      remoteMTU, // Extracted from SYN packet
 	}
 	conn.recvCond = sync.NewCond(&conn.mu)
+	conn.sendCond = sync.NewCond(&conn.mu)
 
 	// Register connection with manager for packet routing
 	if l.manager != nil {
@@ -940,9 +979,8 @@ func (s *StreamConn) sendSynAck() error {
 // MVP implementation:
 //   - Simple chunking based on MTU
 //   - Increment sequence number for each packet
-//   - No sophisticated buffering (send immediately)
-//   - No retransmission (Phase 6+)
-//   - Fixed 6-packet window (no dynamic windowing yet)
+//   - Window-based flow control: blocks when in-flight packets >= cwnd
+//   - Choke handling: waits using condition variable (no race condition)
 //
 // Returns the number of bytes written or an error.
 func (s *StreamConn) Write(data []byte) (int, error) {
@@ -958,25 +996,54 @@ func (s *StreamConn) Write(data []byte) (int, error) {
 	}
 
 	// Respect choke signals from peer
-	// If peer is choked and we're still in the choke period, wait
-	if s.choked && time.Now().Before(s.chokedUntil) {
-		// Calculate how long to wait
-		waitDuration := time.Until(s.chokedUntil)
-		log.Debug().
-			Dur("waitDuration", waitDuration).
-			Msg("peer is choked - waiting before sending")
+	// If sendCond is available, use condition variable (safer, no race condition)
+	// Otherwise fall back to unlock/sleep/lock pattern for backwards compatibility with tests
+	if s.choked && time.Now().Before(s.chokedUntil) && !s.closed {
+		if s.sendCond != nil {
+			// Use condition variable (safer - no race condition)
+			for s.choked && time.Now().Before(s.chokedUntil) && !s.closed {
+				log.Debug().
+					Time("chokedUntil", s.chokedUntil).
+					Msg("peer is choked - waiting for unchoke or timeout")
 
-		// Release lock while waiting to allow receiving unchoke signals
-		s.mu.Unlock()
-		time.Sleep(waitDuration)
-		s.mu.Lock()
+				// Use a timer to wake up when choke period expires
+				chokeEnd := s.chokedUntil
+				go func() {
+					time.Sleep(time.Until(chokeEnd))
+					s.mu.Lock()
+					if s.sendCond != nil {
+						s.sendCond.Broadcast()
+					}
+					s.mu.Unlock()
+				}()
+				s.sendCond.Wait()
 
-		// Re-check state after waiting
-		if s.closed {
-			return 0, fmt.Errorf("connection closed")
-		}
-		if s.state != StateEstablished {
-			return 0, fmt.Errorf("connection not established (state: %s)", s.state)
+				// Re-check connection state after waking
+				if s.closed {
+					return 0, fmt.Errorf("connection closed")
+				}
+				if s.state != StateEstablished {
+					return 0, fmt.Errorf("connection not established (state: %s)", s.state)
+				}
+			}
+		} else {
+			// Fallback: unlock, sleep, re-lock (for tests without sendCond)
+			waitDuration := time.Until(s.chokedUntil)
+			log.Debug().
+				Dur("waitDuration", waitDuration).
+				Msg("peer is choked - waiting before sending (fallback)")
+
+			s.mu.Unlock()
+			time.Sleep(waitDuration)
+			s.mu.Lock()
+
+			// Re-check state after waiting
+			if s.closed {
+				return 0, fmt.Errorf("connection closed")
+			}
+			if s.state != StateEstablished {
+				return 0, fmt.Errorf("connection not established (state: %s)", s.state)
+			}
 		}
 	}
 
@@ -991,6 +1058,25 @@ func (s *StreamConn) Write(data []byte) (int, error) {
 
 	// Split data into MTU-sized chunks
 	for len(data) > 0 {
+		// Window-based flow control: wait if too many packets in flight
+		// This enforces the congestion window (cwnd) limit per I2P streaming spec
+		// Only enforce if sendCond is initialized (tests may create conn without it)
+		for s.sendCond != nil && s.sentPackets != nil && uint32(len(s.sentPackets)) >= s.cwnd && !s.closed {
+			log.Debug().
+				Int("inFlight", len(s.sentPackets)).
+				Uint32("cwnd", s.cwnd).
+				Msg("window full - waiting for ACKs")
+			s.sendCond.Wait()
+
+			// Re-check connection state after waking
+			if s.closed {
+				return total - len(data), fmt.Errorf("connection closed")
+			}
+			if s.state != StateEstablished {
+				return total - len(data), fmt.Errorf("connection not established (state: %s)", s.state)
+			}
+		}
+
 		chunk := data
 		if len(chunk) > mtu {
 			chunk = data[:mtu]
@@ -1433,7 +1519,8 @@ func (s *StreamConn) handleResetLocked(pkt *Packet) error {
 // Must be called with s.mu held.
 func (s *StreamConn) handleAckLocked(pkt *Packet) error {
 	// Update ackThrough if this ACKs more data
-	if pkt.AckThrough > s.ackThrough {
+	// Use wrap-around safe comparison for sequence numbers
+	if seqGreaterThan(pkt.AckThrough, s.ackThrough) {
 		oldAck := s.ackThrough
 		s.ackThrough = pkt.AckThrough
 		log.Debug().
@@ -1594,9 +1681,14 @@ func (s *StreamConn) handleAckLocked(pkt *Packet) error {
 				Time("chokedUntil", s.chokedUntil).
 				Msg("peer is choked - pausing transmission")
 		} else {
-			// Peer is not choked - clear choke state
+			// Peer is not choked - clear choke state and wake waiting writers
+			wasChoked := s.choked
 			s.choked = false
 			s.chokedUntil = time.Time{}
+			if wasChoked && s.sendCond != nil {
+				// Wake any writers blocked on choke
+				s.sendCond.Broadcast()
+			}
 			if pkt.OptionalDelay > 0 {
 				log.Debug().
 					Uint16("delay", pkt.OptionalDelay).
@@ -1649,7 +1741,8 @@ func (s *StreamConn) handleDataLocked(pkt *Packet) error {
 		s.deliverBufferedPacketsLocked()
 
 		// Update ackThrough if packet has ACK
-		if pkt.Flags&FlagACK != 0 && pkt.AckThrough > s.ackThrough {
+		// Use wrap-around safe comparison for sequence numbers
+		if pkt.Flags&FlagACK != 0 && seqGreaterThan(pkt.AckThrough, s.ackThrough) {
 			s.ackThrough = pkt.AckThrough
 		}
 
@@ -1694,7 +1787,8 @@ func (s *StreamConn) handleDataLocked(pkt *Packet) error {
 	}
 
 	// Case 2: Duplicate or old packet - ignore
-	if seq < s.recvSeq {
+	// Use wrap-around safe comparison for sequence numbers
+	if seqLessThan(seq, s.recvSeq) {
 		log.Debug().
 			Uint32("expected", s.recvSeq).
 			Uint32("got", seq).
@@ -1771,7 +1865,9 @@ func (s *StreamConn) deliverBufferedPacketsLocked() {
 // Must be called with s.mu held.
 func (s *StreamConn) updateNACKListLocked(receivedSeq uint32) {
 	// Add all missing sequences between recvSeq and receivedSeq to NACK list
-	for seq := s.recvSeq; seq < receivedSeq; seq++ {
+	// Use wrap-around safe iteration: calculate distance and iterate that many times
+	// This correctly handles sequence wrap-around (e.g., recvSeq=0xFFFFFFFE, receivedSeq=0x00000002)
+	for seq := s.recvSeq; seqLessThan(seq, receivedSeq); seq++ {
 		// Only add if we haven't already buffered this packet
 		if _, buffered := s.outOfOrderPackets[seq]; !buffered {
 			// Check if already in NACK list
@@ -1811,6 +1907,7 @@ func (s *StreamConn) removeFromNACKListLocked(seq uint32) {
 
 // cleanupAckedPacketsLocked removes ACKed packets from the sent packet tracking.
 // This prevents unbounded memory growth by cleaning up packets that have been acknowledged.
+// Also signals sendCond to wake blocked writers waiting for window space.
 // Must be called with s.mu held.
 func (s *StreamConn) cleanupAckedPacketsLocked(oldAck, newAck uint32) {
 	if s.sentPackets == nil {
@@ -1818,7 +1915,8 @@ func (s *StreamConn) cleanupAckedPacketsLocked(oldAck, newAck uint32) {
 	}
 	cleaned := 0
 	for seq := range s.sentPackets {
-		if seq <= newAck {
+		// Use wrap-around safe comparison for sequence numbers
+		if seqLessThanOrEqual(seq, newAck) {
 			delete(s.sentPackets, seq)
 			cleaned++
 		}
@@ -1830,6 +1928,11 @@ func (s *StreamConn) cleanupAckedPacketsLocked(oldAck, newAck uint32) {
 			Int("cleaned", cleaned).
 			Int("remaining", len(s.sentPackets)).
 			Msg("cleaned up ACKed packets")
+
+		// Wake any blocked writers now that window space is available
+		if s.sendCond != nil {
+			s.sendCond.Broadcast()
+		}
 	}
 }
 
@@ -2085,8 +2188,13 @@ func (s *StreamConn) Close() error {
 	// Mark as closed
 	s.closed = true
 
-	// Wake up any blocked readers
-	s.recvCond.Broadcast()
+	// Wake up any blocked readers and writers
+	if s.recvCond != nil {
+		s.recvCond.Broadcast()
+	}
+	if s.sendCond != nil {
+		s.sendCond.Broadcast()
+	}
 
 	return nil
 }
