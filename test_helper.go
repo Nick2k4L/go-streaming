@@ -157,6 +157,70 @@ func GenerateTestISN() uint32 {
 	return 1000
 }
 
+// CreateSecondI2CPSession creates a separate I2CP session for client/server tests.
+// This is needed because loopback to the same destination may not work reliably.
+// Returns a new StreamManager with its own session and destination.
+func CreateSecondI2CPSession(t *testing.T) *StreamManager {
+	t.Helper()
+
+	// Create new client
+	client := go_i2cp.NewClient(&go_i2cp.ClientCallBacks{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("Cannot connect second I2CP client: %v", err)
+	}
+
+	// Create StreamManager
+	manager, err := NewStreamManager(client)
+	if err != nil {
+		client.Close()
+		t.Fatalf("Cannot create second StreamManager: %v", err)
+	}
+
+	// Configure session
+	manager.session.Config().SetProperty(go_i2cp.SESSION_CONFIG_PROP_I2CP_FAST_RECEIVE, "true")
+	manager.session.Config().SetProperty(go_i2cp.SESSION_CONFIG_PROP_OUTBOUND_NICKNAME, "go-streaming-test-2")
+	manager.session.Config().SetProperty(go_i2cp.SESSION_CONFIG_PROP_INBOUND_QUANTITY, "1")
+	manager.session.Config().SetProperty(go_i2cp.SESSION_CONFIG_PROP_OUTBOUND_QUANTITY, "1")
+
+	// Start ProcessIO loop
+	go func() {
+		for {
+			if err := client.ProcessIO(context.Background()); err != nil {
+				if err == go_i2cp.ErrClientClosed {
+					return
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+
+	// Start session
+	sessionCtx, sessionCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer sessionCancel()
+
+	err = manager.StartSession(sessionCtx)
+	if err != nil {
+		client.Close()
+		t.Fatalf("Cannot start second I2CP session: %v", err)
+	}
+
+	t.Logf("Created second session, destination: %s...",
+		manager.Destination().Base32()[:32])
+
+	// Register cleanup
+	t.Cleanup(func() {
+		manager.Close()
+		client.Close()
+	})
+
+	return manager
+}
+
 // CleanupTestConnections closes the shared test connection.
 // Call this from TestMain if needed.
 func CleanupTestConnections() {

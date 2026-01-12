@@ -529,6 +529,9 @@ func (s *StreamConn) sendSYN() error {
 		Int("nacks", len(nacks)).
 		Msg("sent SYN")
 
+	// SYN consumes one sequence number - increment for next packet
+	s.sendSeq++
+
 	return nil
 }
 
@@ -797,6 +800,19 @@ func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, re
 		Uint16("localPort", l.localPort).
 		Msg("received SYN")
 
+	// Prefer FromDestination from the packet if available (more reliable)
+	// Fall back to remoteDest from I2CP callback if not present
+	peerDest := remoteDest
+	if synPkt.Flags&FlagFromIncluded != 0 && synPkt.FromDestination != nil {
+		peerDest = synPkt.FromDestination
+		log.Debug().Msg("using FromDestination from SYN packet")
+	}
+
+	if peerDest == nil {
+		log.Error().Msg("SYN packet has no source destination - cannot reply")
+		return fmt.Errorf("SYN packet has no source destination")
+	}
+
 	// Verify SYN signature if present
 	if synPkt.Flags&FlagSignatureIncluded != 0 {
 		if err := VerifyPacketSignature(synPkt, nil); err != nil {
@@ -862,28 +878,31 @@ func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, re
 
 	// Create connection structure
 	conn := &StreamConn{
-		manager:        l.manager,
-		session:        l.session,
-		dest:           remoteDest,
-		localPort:      l.localPort,
-		remotePort:     remotePort,
-		localStreamID:  localStreamID,
-		remoteStreamID: remoteStreamID,
-		sendSeq:        isn,
-		recvSeq:        synPkt.SequenceNum + 1, // Next expected sequence
-		windowSize:     1,                      // Start with slow start at 1 packet
-		cwnd:           1,                      // Congestion window starts at 1
-		ssthresh:       MaxWindowSize,          // Slow start threshold at max (128 packets)
-		rtt:            8 * time.Second,
-		rto:            9 * time.Second,
-		recvBuf:        recvBuf,
-		recvChan:       make(chan *Packet, 32),
-		errChan:        make(chan error, 1),
-		ctx:            ctx,
-		cancel:         cancel,
-		state:          StateInit,
-		localMTU:       l.localMTU,
-		remoteMTU:      remoteMTU, // Extracted from SYN packet
+		manager:           l.manager,
+		session:           l.session,
+		dest:              peerDest, // Use the validated peer destination
+		localPort:         l.localPort,
+		remotePort:        remotePort,
+		localStreamID:     localStreamID,
+		remoteStreamID:    remoteStreamID,
+		sendSeq:           isn,
+		recvSeq:           synPkt.SequenceNum + 1, // Next expected sequence
+		windowSize:        1,                      // Start with slow start at 1 packet
+		cwnd:              1,                      // Congestion window starts at 1
+		ssthresh:          MaxWindowSize,          // Slow start threshold at max (128 packets)
+		rtt:               8 * time.Second,
+		rto:               9 * time.Second,
+		recvBuf:           recvBuf,
+		recvChan:          make(chan *Packet, 32),
+		errChan:           make(chan error, 1),
+		ctx:               ctx,
+		cancel:            cancel,
+		state:             StateInit,
+		localMTU:          l.localMTU,
+		remoteMTU:         remoteMTU, // Extracted from SYN packet
+		sentPackets:       make(map[uint32]*sentPacket),
+		outOfOrderPackets: make(map[uint32]*Packet),
+		nackList:          make([]uint32, 0),
 	}
 	conn.recvCond = sync.NewCond(&conn.mu)
 	conn.sendCond = sync.NewCond(&conn.mu)
@@ -904,6 +923,10 @@ func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, re
 	// Transition to SYN_RCVD state
 	conn.setState(StateSynRcvd)
 
+	// Start receive loop BEFORE queuing for Accept - this allows the ACK to be processed
+	// The receiveLoop will handle the transition from SYN_RCVD to ESTABLISHED
+	go conn.receiveLoop()
+
 	// Queue connection for Accept()
 	// The connection will transition to ESTABLISHED when it receives the final ACK
 	select {
@@ -914,6 +937,7 @@ func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, re
 			Msg("queued connection for Accept()")
 	default:
 		log.Warn().Msg("accept channel full, dropping connection")
+		conn.cancel() // Stop the receive loop
 		if l.manager != nil {
 			l.manager.UnregisterConnection(l.localPort, remotePort)
 		}
@@ -965,6 +989,9 @@ func (s *StreamConn) sendSynAck() error {
 		Uint16("flags", pkt.Flags).
 		Uint16("localMTU", s.localMTU).
 		Msg("sent SYN-ACK")
+
+	// SYN-ACK consumes one sequence number - increment for next packet
+	s.sendSeq++
 
 	return nil
 }
@@ -1473,6 +1500,15 @@ func (s *StreamConn) handleFinalAckLocked(pkt *Packet) error {
 
 	// Transition to ESTABLISHED
 	s.setState(StateEstablished)
+
+	// Start retransmit timer now that we're established
+	// (receiveLoop was already started in handleIncomingSYN)
+	go s.retransmitTimer()
+
+	log.Info().
+		Str("state", s.state.String()).
+		Uint16("negotiatedMTU", s.getNegotiatedMTULocked()).
+		Msg("server-side connection established")
 
 	return nil
 }

@@ -1,8 +1,10 @@
 package streaming
 
 import (
+	"fmt"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -344,39 +346,259 @@ func TestStreamConn_io_Copy(t *testing.T) {
 	assert.Equal(t, testData, dest)
 }
 
-// TestStreamConn_ConcurrentReadWrite tests concurrent Read and Write
-func TestStreamConn_ConcurrentReadWrite(t *testing.T) {
-	conn := createTestConnection(t)
-	defer conn.Close()
+// TestStreamConn_RealRoundTrip tests actual I2P communication with a listener and client.
+// This creates a real listener on one session and a client on another, then measures round-trip time.
+// Uses two separate I2CP sessions to avoid loopback issues.
+func TestStreamConn_RealRoundTrip(t *testing.T) {
+	// Server session
+	serverI2CP := RequireI2CP(t)
 
-	done := make(chan bool)
+	// Client session (separate destination)
+	clientManager := CreateSecondI2CPSession(t)
 
-	// Writer goroutine
+	// Create a listener on the server session
+	listener, err := ListenWithManager(serverI2CP.Manager, 9999, DefaultMTU)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	serverDest := serverI2CP.Manager.Destination()
+	t.Logf("Server listening on %s:9999", serverDest.Base32()[:16])
+	t.Logf("Client dest: %s", clientManager.Destination().Base32()[:16])
+
+	var serverConn net.Conn
+	serverReady := make(chan struct{})
+	serverDone := make(chan struct{})
+	var serverErr error
+
+	// Server goroutine - accepts connection, echoes data back
 	go func() {
-		for i := 0; i < 10; i++ {
-			data := []byte("test message")
-			_, err := conn.Write(data)
-			assert.NoError(t, err)
-			time.Sleep(10 * time.Millisecond)
+		defer close(serverDone)
+
+		// Accept blocks until connection arrives or listener closes
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr = fmt.Errorf("accept failed: %w", err)
+			close(serverReady)
+			return
 		}
-		done <- true
+		serverConn = conn
+		close(serverReady)
+
+		t.Log("Server: connection accepted")
+
+		// Echo server - read data and send it back
+		buf := make([]byte, 1024)
+		for {
+			conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+			n, err := conn.Read(buf)
+			if err != nil {
+				if err == io.EOF {
+					t.Log("Server: client closed connection")
+				} else {
+					t.Logf("Server: read error: %v", err)
+				}
+				return
+			}
+			t.Logf("Server: received %d bytes: %q", n, string(buf[:n]))
+
+			// Echo back
+			conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+			_, err = conn.Write(buf[:n])
+			if err != nil {
+				t.Logf("Server: write error: %v", err)
+				return
+			}
+			t.Logf("Server: echoed %d bytes", n)
+		}
 	}()
 
-	// Reader goroutine
+	// Client - dial the server from a different session
+	// Use localPort 12345, remotePort 9999 (the listener port)
+	t.Log("Client: dialing server...")
+	clientConn, err := DialWithManager(clientManager, serverDest, 12345, 9999)
+	require.NoError(t, err)
+	defer clientConn.Close()
+
+	t.Log("Client: connected, waiting for server to accept...")
+
+	// Wait for server to be ready
+	select {
+	case <-serverReady:
+		if serverErr != nil {
+			t.Fatalf("Server error: %v", serverErr)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Timeout waiting for server to accept connection")
+	}
+
+	// Test messages with timing
+	messages := []string{
+		"Hello I2P!",
+		"This is a round-trip test",
+		"Measuring latency over the I2P network",
+	}
+
+	var totalRTT time.Duration
+	var rttSamples int
+
+	for i, msg := range messages {
+		t.Logf("Client: sending message %d: %q", i+1, msg)
+
+		start := time.Now()
+
+		// Send message
+		clientConn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+		_, err := clientConn.Write([]byte(msg))
+		require.NoError(t, err, "write failed for message %d", i+1)
+
+		// Read echo response
+		buf := make([]byte, len(msg))
+		clientConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		n, err := io.ReadFull(clientConn, buf)
+		require.NoError(t, err, "read failed for message %d", i+1)
+
+		rtt := time.Since(start)
+		totalRTT += rtt
+		rttSamples++
+
+		assert.Equal(t, msg, string(buf[:n]), "echo mismatch for message %d", i+1)
+		t.Logf("Client: received echo, RTT: %v", rtt)
+	}
+
+	avgRTT := totalRTT / time.Duration(rttSamples)
+	t.Logf("=== Round-Trip Results ===")
+	t.Logf("Messages sent: %d", rttSamples)
+	t.Logf("Total time: %v", totalRTT)
+	t.Logf("Average RTT: %v", avgRTT)
+
+	// Close client connection
+	clientConn.Close()
+
+	// Wait for server to finish
+	select {
+	case <-serverDone:
+	case <-time.After(5 * time.Second):
+		t.Log("Server goroutine timed out (may still be running)")
+	}
+
+	if serverConn != nil {
+		serverConn.Close()
+	}
+}
+
+// TestStreamConn_ConcurrentReadWrite tests concurrent Read and Write with real I2P.
+// Sets up an echo server and has multiple goroutines reading/writing simultaneously.
+// Uses two separate I2CP sessions to avoid loopback issues.
+func TestStreamConn_ConcurrentReadWrite(t *testing.T) {
+	// Server session
+	serverI2CP := RequireI2CP(t)
+
+	// Client session (separate destination)
+	clientManager := CreateSecondI2CPSession(t)
+
+	// Create a listener on the server
+	listener, err := ListenWithManager(serverI2CP.Manager, 9998, DefaultMTU)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	serverDest := serverI2CP.Manager.Destination()
+	serverReady := make(chan struct{})
+	serverDone := make(chan struct{})
+
+	// Echo server
 	go func() {
-		conn.mu.Lock()
-		conn.recvBuf.Write([]byte("response"))
-		conn.recvCond.Broadcast()
-		conn.mu.Unlock()
+		defer close(serverDone)
 
-		buf := make([]byte, 100)
-		n, err := conn.Read(buf)
-		assert.NoError(t, err)
-		assert.Equal(t, "response", string(buf[:n]))
-		done <- true
+		// Accept blocks until connection arrives
+		conn, err := listener.Accept()
+		if err != nil {
+			t.Logf("Server accept error: %v", err)
+			close(serverReady)
+			return
+		}
+		defer conn.Close()
+		close(serverReady)
+
+		// Simple echo loop
+		buf := make([]byte, 4096)
+		for {
+			conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+			n, err := conn.Read(buf)
+			if err != nil {
+				return
+			}
+			conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+			conn.Write(buf[:n])
+		}
 	}()
 
-	// Wait for both goroutines
-	<-done
-	<-done
+	// Client connects from second session
+	clientConn, err := DialWithManager(clientManager, serverDest, 12346, 9998)
+	require.NoError(t, err)
+	defer clientConn.Close()
+
+	select {
+	case <-serverReady:
+	case <-time.After(60 * time.Second):
+		t.Fatal("Timeout waiting for server")
+	}
+
+	// Concurrent test
+	var wg sync.WaitGroup
+	const numWriters = 3
+	const messagesPerWriter = 5
+
+	// Writers send messages
+	for w := 0; w < numWriters; w++ {
+		wg.Add(1)
+		go func(writerID int) {
+			defer wg.Done()
+			for i := 0; i < messagesPerWriter; i++ {
+				msg := fmt.Sprintf("writer%d-msg%d", writerID, i)
+				clientConn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+				_, err := clientConn.Write([]byte(msg))
+				if err != nil {
+					t.Logf("Writer %d error: %v", writerID, err)
+					return
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}(w)
+	}
+
+	// Reader collects echoes
+	received := make(chan string, numWriters*messagesPerWriter)
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			clientConn.SetReadDeadline(time.Now().Add(15 * time.Second))
+			n, err := clientConn.Read(buf)
+			if err != nil {
+				return
+			}
+			received <- string(buf[:n])
+		}
+	}()
+
+	// Wait for writers
+	wg.Wait()
+
+	// Give time for echoes to arrive
+	time.Sleep(2 * time.Second)
+	clientConn.Close()
+
+	// Count received
+	close(received)
+	count := 0
+	for msg := range received {
+		t.Logf("Received echo: %q", msg)
+		count++
+	}
+
+	t.Logf("=== Concurrent Test Results ===")
+	t.Logf("Sent: %d messages from %d writers", numWriters*messagesPerWriter, numWriters)
+	t.Logf("Received: %d echoes", count)
+
+	// We should receive at least some echoes
+	assert.Greater(t, count, 0, "Should have received at least some echo responses")
 }
