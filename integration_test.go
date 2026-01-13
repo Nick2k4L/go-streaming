@@ -101,7 +101,7 @@ func TestEndToEnd_PacketRoundTrip(t *testing.T) {
 }
 
 // TestEndToEnd_StreamConnReadWrite tests the full Read/Write cycle on a StreamConn.
-// This tests our implementation without requiring I2CP networking.
+// This tests our implementation with real I2CP session.
 func TestEndToEnd_StreamConnReadWrite(t *testing.T) {
 	// Create a real StreamConn in established state
 	recvBuf, err := circbuf.NewBuffer(32768)
@@ -112,7 +112,7 @@ func TestEndToEnd_StreamConnReadWrite(t *testing.T) {
 
 	conn := &StreamConn{
 		manager:    nil, // No manager for this test
-		session:    createMockSession(),
+		session:    RequireI2CPSession(t),
 		localPort:  8080,
 		remotePort: 12345,
 		sendSeq:    1000,
@@ -348,7 +348,7 @@ func TestEndToEnd_BidirectionalCommunication(t *testing.T) {
 
 	// Client side
 	client := &StreamConn{
-		session:    createMockSession(),
+		session:    RequireI2CPSession(t),
 		localPort:  12345,
 		remotePort: 8080,
 		sendSeq:    1000,
@@ -365,7 +365,7 @@ func TestEndToEnd_BidirectionalCommunication(t *testing.T) {
 
 	// Server side
 	server := &StreamConn{
-		session:    createMockSession(),
+		session:    RequireI2CPSession(t),
 		localPort:  8080,
 		remotePort: 12345,
 		sendSeq:    5000,
@@ -440,7 +440,7 @@ func TestEndToEnd_CloseHandshake(t *testing.T) {
 	defer cancel()
 
 	conn := &StreamConn{
-		session:    createMockSession(),
+		session:    RequireI2CPSession(t),
 		localPort:  12345,
 		remotePort: 8080,
 		sendSeq:    1000,

@@ -13,20 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// createMockSession creates a minimal mock session for testing.
-// This is needed because Listen() requires a non-nil session.
-// For unit tests, we don't actually use the session, we just need it to exist.
-func createMockSession() *go_i2cp.Session {
-	// Create a client with empty callbacks
-	client := go_i2cp.NewClient(&go_i2cp.ClientCallBacks{})
-
-	// Create session with empty callbacks
-	callbacks := go_i2cp.SessionCallbacks{}
-	session := go_i2cp.NewSession(client, callbacks)
-
-	return session
-}
-
 // TestI2PAddr_Network tests I2PAddr.Network() method
 func TestI2PAddr_Network(t *testing.T) {
 	addr := &I2PAddr{port: 8080}
@@ -284,10 +270,10 @@ func TestStreamConn_CloseSendsCLOSEPacket(t *testing.T) {
 	conn.mu.Unlock()
 }
 
-// TestStreamListener_Addr tests Addr() method
+// TestStreamListener_Addr tests Addr() method with a real I2CP connection
 func TestStreamListener_Addr(t *testing.T) {
-	session := createMockSession()
-	listener, err := Listen(session, 8080)
+	i2cp := RequireI2CP(t)
+	listener, err := ListenWithManager(i2cp.Manager, 8080, DefaultMTU)
 	require.NoError(t, err)
 	defer listener.Close()
 
@@ -302,8 +288,8 @@ func TestStreamListener_Addr(t *testing.T) {
 
 // TestStreamListener_ImplementsNetListener verifies StreamListener implements net.Listener
 func TestStreamListener_ImplementsNetListener(t *testing.T) {
-	session := createMockSession()
-	listener, err := Listen(session, 8080)
+	i2cp := RequireI2CP(t)
+	listener, err := ListenWithManager(i2cp.Manager, 8081, DefaultMTU)
 	require.NoError(t, err)
 	defer listener.Close()
 

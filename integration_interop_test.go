@@ -12,11 +12,9 @@
 package streaming
 
 import (
-	"context"
 	"testing"
 	"time"
 
-	go_i2cp "github.com/go-i2p/go-i2cp"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,19 +24,11 @@ func TestJavaI2P_RouterConnection(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	// Create I2CP client
-	client := go_i2cp.NewClient(&go_i2cp.ClientCallBacks{})
+	// Use shared I2CP connection which validates router connectivity
+	i2cp := RequireI2CP(t)
 
-	// Connect to router with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	t.Log("connecting to Java I2P router at 127.0.0.1:7654...")
-	err := client.Connect(ctx)
-	require.NoError(t, err, "should connect to Java I2P router")
-	defer client.Close()
-
-	t.Log("✓ connected to Java I2P router")
+	t.Log("✓ connected to Java I2P router via shared I2CP session")
+	t.Logf("✓ destination: %s...", i2cp.Manager.Destination().Base32()[:16])
 }
 
 // TestJavaI2P_SessionCreation tests creating an I2CP session
@@ -50,118 +40,12 @@ func TestJavaI2P_SessionCreation(t *testing.T) {
 	t.Log("=== I2CP Session Creation Handshake Trace ===")
 	t.Log("")
 
-	// Create I2CP client
-	t.Log("Step 1: Creating I2CP client...")
-	client := go_i2cp.NewClient(&go_i2cp.ClientCallBacks{})
-	t.Log("  ✓ Client created")
+	// Use shared I2CP connection (session already created)
+	i2cp := RequireI2CP(t)
 
-	// Connect to router
-	t.Log("Step 2: Connecting to router at 127.0.0.1:7654...")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	err := client.Connect(ctx)
-	require.NoError(t, err, "should connect to router")
-	defer client.Close()
-	t.Log("  ✓ Connected to router")
-
-	// Create StreamManager (handles session creation)
-	t.Log("Step 3: Creating StreamManager with callbacks...")
-	manager, err := NewStreamManager(client)
-	require.NoError(t, err, "should create stream manager")
-	defer manager.Close()
-	t.Log("  ✓ StreamManager created")
-	t.Log("  ✓ SessionCallbacks registered:")
-	t.Log("    - OnMessage:       handleIncomingMessage")
-	t.Log("    - OnStatus:        handleSessionStatus")
-	t.Log("    - OnDestination:   handleDestinationResult")
-	t.Log("    - OnMessageStatus: handleMessageStatus")
-
-	t.Log("")
-	t.Log("Step 3.5: Configuring session properties...")
-	// Configure session matching go-i2cp integration test pattern
-	manager.session.Config().SetProperty(go_i2cp.SESSION_CONFIG_PROP_I2CP_FAST_RECEIVE, "true")
-	manager.session.Config().SetProperty(go_i2cp.SESSION_CONFIG_PROP_OUTBOUND_NICKNAME, "go-streaming-integration-test")
-	manager.session.Config().SetProperty(go_i2cp.SESSION_CONFIG_PROP_INBOUND_QUANTITY, "2")
-	manager.session.Config().SetProperty(go_i2cp.SESSION_CONFIG_PROP_OUTBOUND_QUANTITY, "2")
-	t.Log("  ✓ Session configured with:")
-	t.Log("    - outbound.nickname: go-streaming-integration-test")
-	t.Log("    - inbound.quantity:  2 tunnels")
-	t.Log("    - outbound.quantity: 2 tunnels")
-	t.Log("    - fastReceive:       enabled")
-
-	// Start ProcessIO BEFORE creating session
-	t.Log("")
-	t.Log("Step 4: Starting ProcessIO loop...")
-	processIOStarted := make(chan struct{})
-	go func() {
-		close(processIOStarted)
-		t.Log("  ✓ ProcessIO loop started")
-		for {
-			if err := client.ProcessIO(context.Background()); err != nil {
-				if err == go_i2cp.ErrClientClosed {
-					t.Log("  ✓ ProcessIO loop exited (client closed)")
-					return
-				}
-				t.Logf("  ⚠ ProcessIO error: %v", err)
-			}
-			// Always sleep to prevent spinning - ProcessIO returns immediately if no data
-			time.Sleep(50 * time.Millisecond)
-		}
-	}()
-	<-processIOStarted
-	time.Sleep(100 * time.Millisecond) // Let ProcessIO start
-
-	// Now start session
-	t.Log("")
-	t.Log("Step 5: Sending CreateSession message to router...")
-	t.Log("  → Expected response: SessionCreated with status")
-	sessionCtx, sessionCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer sessionCancel()
-
-	// Monitor for timeout
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for i := 1; i <= 6; i++ {
-			select {
-			case <-ticker.C:
-				t.Logf("  ⏱ Waiting for SessionCreated response... (%ds elapsed)", i*5)
-			case <-sessionCtx.Done():
-				return
-			}
-		}
-	}()
-
-	err = manager.StartSession(sessionCtx)
-	if err != nil {
-		t.Log("")
-		t.Log("❌ Session creation FAILED")
-		t.Logf("   Error: %v", err)
-		t.Log("")
-		t.Log("Troubleshooting steps:")
-		t.Log("  1. Check Java I2P router logs for CreateSession messages")
-		t.Log("  2. Verify I2CP port 7654 accepts session requests")
-		t.Log("  3. Check if router requires authentication")
-		t.Log("  4. Verify router is fully started and connected to network")
-		require.NoError(t, err, "should create I2CP session")
-	}
-
-	t.Log("")
-	t.Log("Step 6: Session created successfully!")
-
-	// Verify destination was created
-	dest := manager.Destination()
-	require.NotNil(t, dest, "should have destination")
-	t.Logf("  ✓ I2CP session created")
-	t.Logf("  ✓ Session ID: %d", manager.session.ID())
-	t.Logf("  ✓ Destination: %s", dest.Base32()[:52]+"...")
-
-	// Keep session alive briefly to ensure stability
-	t.Log("")
-	t.Log("Step 7: Verifying session stability...")
-	time.Sleep(2 * time.Second)
-	t.Log("  ✓ Session stable for 2 seconds")
+	t.Log("✓ Using shared I2CP session")
+	t.Logf("  ✓ Session ID: %d", i2cp.Manager.Session().ID())
+	t.Logf("  ✓ Destination: %s...", i2cp.Manager.Destination().Base32()[:52])
 	t.Log("")
 	t.Log("=== Session Creation Successful ===")
 }
@@ -172,45 +56,18 @@ func TestJavaI2P_ListenerCreation(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	// Setup I2CP session
-	client := go_i2cp.NewClient(&go_i2cp.ClientCallBacks{})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	err := client.Connect(ctx)
-	require.NoError(t, err)
-	defer client.Close()
-
-	manager, err := NewStreamManager(client)
-	require.NoError(t, err)
-	defer manager.Close()
-
-	// Start ProcessIO BEFORE StartSession (critical ordering!)
-	go func() {
-		for {
-			if err := client.ProcessIO(context.Background()); err != nil {
-				if err == go_i2cp.ErrClientClosed {
-					return
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-		}
-	}()
-
-	sessionCtx, sessionCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer sessionCancel()
-	err = manager.StartSession(sessionCtx)
-	require.NoError(t, err)
+	// Use shared I2CP session
+	i2cp := RequireI2CP(t)
 
 	// Create streaming listener
-	t.Log("creating streaming listener on port 8080...")
-	listener, err := ListenWithManager(manager, 8080, DefaultMTU)
+	t.Log("creating streaming listener on port 8085...")
+	listener, err := ListenWithManager(i2cp.Manager, 8085, DefaultMTU)
 	require.NoError(t, err, "should create listener")
 	defer listener.Close()
 
 	t.Logf("✓ listener created")
-	t.Logf("  Listening on port: 8080")
-	t.Logf("  Destination: %s", manager.Destination().Base32())
+	t.Logf("  Listening on port: 8085")
+	t.Logf("  Destination: %s", i2cp.Manager.Destination().Base32())
 
 	// Verify listener is ready
 	time.Sleep(1 * time.Second)
@@ -223,35 +80,8 @@ func TestJavaI2P_PacketFormat(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	// Setup I2CP session
-	client := go_i2cp.NewClient(&go_i2cp.ClientCallBacks{})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	err := client.Connect(ctx)
-	require.NoError(t, err)
-	defer client.Close()
-
-	manager, err := NewStreamManager(client)
-	require.NoError(t, err)
-	defer manager.Close()
-
-	// Start ProcessIO BEFORE StartSession (critical ordering!)
-	go func() {
-		for {
-			if err := client.ProcessIO(context.Background()); err != nil {
-				if err == go_i2cp.ErrClientClosed {
-					return
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-		}
-	}()
-
-	sessionCtx, sessionCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer sessionCancel()
-	err = manager.StartSession(sessionCtx)
-	require.NoError(t, err)
+	// Use shared I2CP session
+	i2cp := RequireI2CP(t)
 
 	// Create a test SYN packet (without signature for simplicity)
 	pkt := &Packet{
@@ -260,7 +90,7 @@ func TestJavaI2P_PacketFormat(t *testing.T) {
 		SequenceNum:     1000,  // Initial sequence number
 		AckThrough:      0,
 		Flags:           FlagSYN | FlagFromIncluded,
-		FromDestination: manager.Destination(),
+		FromDestination: i2cp.Manager.Destination(),
 	}
 
 	// Add 8 NACKs (Java I2P compatibility)

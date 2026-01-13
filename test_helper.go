@@ -233,3 +233,12 @@ func CleanupTestConnections() {
 		sharedTestConnection = nil
 	}
 }
+
+// RequireI2CPSession returns a shared I2CP session for tests that need
+// just a session object (not a full StreamManager connection setup).
+// This is useful for unit tests that construct StreamConn manually.
+func RequireI2CPSession(t *testing.T) *go_i2cp.Session {
+	t.Helper()
+	i2cp := RequireI2CP(t)
+	return i2cp.Manager.Session()
+}

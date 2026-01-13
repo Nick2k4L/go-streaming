@@ -123,7 +123,7 @@ func TestListenMTUValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			session := createMockSession()
+			session := RequireI2CPSession(t)
 			listener, err := ListenWithMTU(session, 8080, tt.mtu)
 
 			if tt.shouldError {
@@ -145,8 +145,8 @@ func TestListenMTUValidation(t *testing.T) {
 
 // TestListenerClose verifies listener can be closed properly.
 func TestListenerClose(t *testing.T) {
-	session := createMockSession()
-	listener, err := Listen(session, 8080)
+	session := RequireI2CPSession(t)
+	listener, err := Listen(session, 8082)
 	require.NoError(t, err)
 	require.NotNil(t, listener)
 
