@@ -356,6 +356,106 @@ func TestClose_WakesBlockedReaders(t *testing.T) {
 	}
 }
 
+// TestWrite_RespectsWriteDeadline tests that Write respects write deadline
+func TestWrite_RespectsWriteDeadline(t *testing.T) {
+	conn := createTestConnection(t)
+	defer conn.Close()
+
+	// Set a write deadline in the past
+	conn.SetWriteDeadline(time.Now().Add(-1 * time.Second))
+
+	data := []byte("test")
+	n, err := conn.Write(data)
+
+	// Should return timeout error
+	assert.Error(t, err)
+	assert.Equal(t, 0, n)
+	// Check it's a timeout error
+	var timeoutErr *timeoutError
+	assert.ErrorAs(t, err, &timeoutErr)
+}
+
+// TestWrite_DeadlineExpiresDuringChoke tests that Write respects deadline while waiting for choke to expire
+func TestWrite_DeadlineExpiresDuringChoke(t *testing.T) {
+	conn := createTestConnection(t)
+	defer conn.Close()
+
+	// Set connection to choked state
+	conn.mu.Lock()
+	conn.choked = true
+	conn.chokedUntil = time.Now().Add(2 * time.Second)
+	conn.mu.Unlock()
+
+	// Set write deadline to expire before choke expires
+	conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+
+	data := []byte("test")
+	start := time.Now()
+	n, err := conn.Write(data)
+	elapsed := time.Since(start)
+
+	// Should return timeout error quickly (not wait 2 seconds for choke)
+	assert.Error(t, err)
+	assert.Equal(t, 0, n)
+	var timeoutErr *timeoutError
+	assert.ErrorAs(t, err, &timeoutErr)
+
+	// Verify it returned quickly (less than 500ms, not 2 seconds)
+	assert.Less(t, elapsed, 500*time.Millisecond)
+}
+
+// TestWrite_DeadlineExpiresDuringFlowControl tests that Write respects deadline during flow control wait
+func TestWrite_DeadlineExpiresDuringFlowControl(t *testing.T) {
+	conn := createTestConnection(t)
+	defer conn.Close()
+
+	// Set up flow control scenario: fill the congestion window
+	conn.mu.Lock()
+	// Create a full congestion window of packets
+	conn.sentPackets = make(map[uint32]*sentPacket)
+	for i := 0; i < int(conn.cwnd); i++ {
+		conn.sentPackets[uint32(i)] = &sentPacket{
+			data:       []byte{1, 2, 3},
+			sentTime:   time.Now(),
+			retryCount: 0,
+		}
+	}
+	conn.mu.Unlock()
+
+	// Set write deadline to expire very soon
+	conn.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
+
+	data := make([]byte, 1000)
+	start := time.Now()
+	_, err := conn.Write(data)
+	elapsed := time.Since(start)
+
+	// Should return timeout error
+	assert.Error(t, err)
+	var timeoutErr *timeoutError
+	assert.ErrorAs(t, err, &timeoutErr)
+
+	// Should return quickly (within 200ms tolerance)
+	assert.Less(t, elapsed, 200*time.Millisecond)
+}
+
+// TestWrite_ZeroDeadlineNeverExpires tests that zero deadline means no timeout
+func TestWrite_ZeroDeadlineNeverExpires(t *testing.T) {
+	conn := createTestConnection(t)
+	defer conn.Close()
+
+	// Set zero deadline (no timeout)
+	conn.SetWriteDeadline(time.Time{})
+
+	// This should not timeout even though we're writing to a non-drained connection
+	data := []byte("test")
+	n, err := conn.Write(data)
+
+	// Should succeed
+	assert.NoError(t, err)
+	assert.Equal(t, len(data), n)
+}
+
 // Helper functions
 
 // createTestConnection creates a StreamConn for testing with real I2CP

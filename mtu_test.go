@@ -227,3 +227,50 @@ func TestMTUNegotiation_ExtractionFromPackets(t *testing.T) {
 		})
 	}
 }
+
+// TestProcessSynAck_ExtractsMTU tests that processSynAck() correctly extracts MTU from SYN-ACK packets
+func TestProcessSynAck_ExtractsMTU(t *testing.T) {
+	tests := []struct {
+		name           string
+		packetMTU      uint16
+		includeFlag    bool
+		expectedRemote uint16
+	}{
+		{"SYN-ACK with DefaultMTU flag", DefaultMTU, true, DefaultMTU},
+		{"SYN-ACK with ECIESMTU flag", ECIESMTU, true, ECIESMTU},
+		{"SYN-ACK with MinMTU flag", MinMTU, true, MinMTU},
+		{"SYN-ACK missing MTU flag", DefaultMTU, false, DefaultMTU},
+		{"SYN-ACK with flag but zero MTU", 0, true, DefaultMTU},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := createTestConnection(t)
+			defer conn.Close()
+
+			// Create SYN-ACK packet
+			synAck := &Packet{
+				SendStreamID: 9999,                   // Peer's stream ID
+				RecvStreamID: uint32(conn.localPort), // Our stream ID (as echoed by peer)
+				SequenceNum:  5000,                   // Peer's ISN
+				AckThrough:   conn.sendSeq - 1,
+				Flags:        FlagSYN | FlagACK,
+			}
+
+			if tt.includeFlag && tt.packetMTU > 0 {
+				synAck.Flags |= FlagMaxPacketSizeIncluded
+				synAck.MaxPacketSize = tt.packetMTU
+			}
+
+			// Process SYN-ACK
+			conn.processSynAck(synAck)
+
+			// Verify MTU was extracted correctly
+			assert.Equal(t, tt.expectedRemote, conn.remoteMTU, "Remote MTU should match expected value")
+
+			// Verify other fields were set correctly
+			assert.Equal(t, uint32(5001), conn.recvSeq, "recvSeq should be peer's ISN + 1")
+			assert.Equal(t, uint32(9999), conn.remoteStreamID, "remoteStreamID should be peer's stream ID")
+		})
+	}
+}
