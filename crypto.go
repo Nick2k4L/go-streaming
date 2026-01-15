@@ -89,42 +89,40 @@ func VerifyPacketSignature(pkt *Packet, crypto *go_i2cp.Crypto) error {
 		return fmt.Errorf("cannot verify: FlagSignatureIncluded not set")
 	}
 
-	// Get the signing public key from the destination
-	// We need to reconstruct the key pair from the destination data
-	// Since go-i2cp doesn't expose the public key directly from Destination,
-	// we need to use the destination's encoded data
-
-	// Save original signature
+	// Save original signature before zeroing for verification
 	originalSig := pkt.Signature
+	sigLen := len(originalSig)
 
-	// Temporarily zero the signature for verification
-	pkt.Signature = make([]byte, len(originalSig))
-	_, err := pkt.Marshal()
+	// Zero the signature field for marshaling (signature covers packet with zeroed sig)
+	pkt.Signature = make([]byte, sigLen)
 
-	// Restore original signature
+	// Marshal the packet with zeroed signature
+	data, err := pkt.Marshal()
+
+	// Restore original signature immediately
 	pkt.Signature = originalSig
 
 	if err != nil {
 		return fmt.Errorf("marshal for verification: %w", err)
 	}
 
-	// Extract the signing key from the destination
-	// The destination contains the public key, we need to create a key pair
-	// to access the Verify method
+	// Find signature location in marshaled data and ensure it's zeroed
+	sigOffset := findSignatureOffset(pkt)
+	if sigOffset+sigLen > len(data) {
+		return fmt.Errorf("signature offset+length (%d) exceeds data length (%d)", sigOffset+sigLen, len(data))
+	}
 
-	// TODO: Implement public key extraction from destination
-	// The I2P destination format is:
-	// - public_key (256 bytes for encryption, or variable for newer types)
-	// - signing_public_key (variable length based on signature type)
-	// - certificate (variable length)
-	//
-	// For Ed25519, the signing public key is 32 bytes
-	// We need to parse the destination to extract this key
-	//
-	// For now, verification requires the caller to pass the signing keypair
-	// This is a known limitation that will be addressed in a future task
+	// Zero out the signature bytes in the marshaled data (should already be zero, but ensure)
+	for i := 0; i < sigLen; i++ {
+		data[sigOffset+i] = 0
+	}
 
-	return fmt.Errorf("signature verification not yet fully implemented - needs public key extraction from destination")
+	// Use the destination's VerifySignature method to verify
+	if !pkt.FromDestination.VerifySignature(data, originalSig) {
+		return fmt.Errorf("signature verification failed: invalid signature")
+	}
+
+	return nil
 }
 
 // VerifyOfflineSignature verifies an offline signature (LS2) by checking that:

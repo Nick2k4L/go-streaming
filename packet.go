@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	go_i2cp "github.com/go-i2p/go-i2cp"
-	"github.com/rs/zerolog/log"
 )
 
 // Packet flags per I2P streaming specification
@@ -435,86 +434,6 @@ func (p *Packet) Unmarshal(data []byte) error {
 	if offset < len(data) {
 		p.Payload = data[offset:]
 	}
-
-	return nil
-}
-
-// sendRaw sends a raw packet with specified flags and payload.
-// This is the core primitive for all packet transmission.
-//
-// Design decisions:
-//   - Uses I2CP protocol 6 (PROTOCOL_STREAMING) per spec
-//   - Increments sendSeq after each send (caller's responsibility to manage)
-//   - Simple error propagation (wrap I2CP errors with context)
-//   - No retransmission logic (Phase 1 MVP - send once and hope)
-//   - Logs all packet sends for debugging (essential for streaming protocol development)
-func (s *StreamConn) sendRaw(flags uint16, payload []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.closed {
-		log.Warn().
-			Uint16("localPort", s.localPort).
-			Uint16("remotePort", s.remotePort).
-			Msg("attempted to send on closed connection")
-		return fmt.Errorf("connection closed")
-	}
-
-	// Construct packet
-	pkt := &Packet{
-		SendStreamID: uint32(s.localPort), // Using port as stream ID for now
-		RecvStreamID: uint32(s.remotePort),
-		SequenceNum:  s.sendSeq,
-		AckThrough:   s.recvSeq,
-		Flags:        flags,
-		Payload:      payload,
-	}
-
-	// Log packet details before sending
-	log.Debug().
-		Uint32("sendStreamID", pkt.SendStreamID).
-		Uint32("recvStreamID", pkt.RecvStreamID).
-		Uint32("seq", pkt.SequenceNum).
-		Uint32("ack", pkt.AckThrough).
-		Uint16("flags", flags).
-		Int("payloadLen", len(payload)).
-		Msg("sending packet")
-
-	// Serialize packet
-	data, err := pkt.Marshal()
-	if err != nil {
-		log.Error().
-			Err(err).
-			Msg("failed to marshal packet")
-		return fmt.Errorf("marshal packet: %w", err)
-	}
-
-	// Send via I2CP
-	// Protocol 6 = PROTOCOL_STREAMING per I2CP spec
-	stream := go_i2cp.NewStream(data)
-	err = s.session.SendMessage(
-		s.dest,
-		6, // PROTOCOL_STREAMING
-		s.localPort,
-		s.remotePort,
-		stream,
-		0, // nonce
-	)
-	if err != nil {
-		log.Error().
-			Err(err).
-			Uint16("localPort", s.localPort).
-			Uint16("remotePort", s.remotePort).
-			Msg("failed to send I2CP message")
-		return fmt.Errorf("send i2cp message: %w", err)
-	}
-
-	// Increment sequence number for next packet
-	s.sendSeq++
-
-	log.Trace().
-		Uint32("newSeq", s.sendSeq).
-		Msg("incremented sequence number")
 
 	return nil
 }

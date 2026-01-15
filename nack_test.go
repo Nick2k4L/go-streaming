@@ -506,3 +506,99 @@ func TestUpdateNACKListDeduplication(t *testing.T) {
 		seen[nack] = true
 	}
 }
+
+// TestUpdateNACKListLargeGap verifies that large sequence gaps (including wrap-around)
+// are handled efficiently without excessive CPU usage.
+func TestUpdateNACKListLargeGap(t *testing.T) {
+	tests := []struct {
+		name             string
+		recvSeq          uint32
+		receivedSeq      uint32
+		expectedMaxNACKs int
+		description      string
+	}{
+		{
+			name:             "Normal gap within MaxNACKs",
+			recvSeq:          100,
+			receivedSeq:      200,
+			expectedMaxNACKs: 100,
+			description:      "Gap of 100 should add all sequences",
+		},
+		{
+			name:             "Large gap exceeds MaxNACKs",
+			recvSeq:          100,
+			receivedSeq:      1000,
+			expectedMaxNACKs: MaxNACKs,
+			description:      "Gap of 900 should be limited to MaxNACKs",
+		},
+		{
+			name:             "Wrap-around small gap",
+			recvSeq:          0xFFFFFFFE,
+			receivedSeq:      0x00000005, // Gap of 7 across wrap-around
+			expectedMaxNACKs: 7,
+			description:      "Gap of 7 across wrap-around boundary should work correctly",
+		},
+		{
+			name:             "Wrap-around large gap",
+			recvSeq:          10,
+			receivedSeq:      0xFFFFFF00, // Would be ~4 billion iterations without fix
+			expectedMaxNACKs: MaxNACKs,
+			description:      "Apparent large gap should be limited to MaxNACKs",
+		},
+		{
+			name:             "Maximum possible gap",
+			recvSeq:          0,
+			receivedSeq:      0xFFFFFFFF, // Maximum uint32 gap
+			expectedMaxNACKs: MaxNACKs,
+			description:      "Maximum gap should be limited to MaxNACKs",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStreamConn(tt.recvSeq)
+
+			// This should complete quickly (< 1 second) even with large gaps
+			// Without the fix, wrap-around cases could take minutes/hours
+			s.mu.Lock()
+			s.updateNACKListLocked(tt.receivedSeq)
+			nackCount := len(s.nackList)
+			s.mu.Unlock()
+
+			// Verify we got the expected number of NACKs
+			require.LessOrEqual(t, nackCount, tt.expectedMaxNACKs,
+				"%s: NACK count should be <= %d, got %d",
+				tt.description, tt.expectedMaxNACKs, nackCount)
+
+			// Verify the first few NACKs start at recvSeq
+			if nackCount > 0 {
+				require.Contains(t, s.nackList, tt.recvSeq,
+					"First NACK should be recvSeq=%d", tt.recvSeq)
+			}
+		})
+	}
+}
+
+// TestUpdateNACKListWrapAroundCorrectness verifies that wrap-around gaps
+// produce the correct sequence numbers in the NACK list.
+func TestUpdateNACKListWrapAroundCorrectness(t *testing.T) {
+	// Test wrap-around from 0xFFFFFFFE to 0x00000002 (gap of 4)
+	s := newTestStreamConn(0xFFFFFFFE)
+
+	s.mu.Lock()
+	s.updateNACKListLocked(0x00000002)
+	nackList := make([]uint32, len(s.nackList))
+	copy(nackList, s.nackList)
+	s.mu.Unlock()
+
+	// Expected NACKs: 0xFFFFFFFE, 0xFFFFFFFF, 0x00000000, 0x00000001
+	expectedNACKs := []uint32{0xFFFFFFFE, 0xFFFFFFFF, 0x00000000, 0x00000001}
+
+	require.Equal(t, len(expectedNACKs), len(nackList),
+		"Should have exactly %d NACKs for gap of 4", len(expectedNACKs))
+
+	for _, expected := range expectedNACKs {
+		require.Contains(t, nackList, expected,
+			"NACK list should contain sequence %d (0x%X)", expected, expected)
+	}
+}

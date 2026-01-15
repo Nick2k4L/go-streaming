@@ -829,9 +829,10 @@ func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, re
 	// Verify SYN signature if present
 	if synPkt.Flags&FlagSignatureIncluded != 0 {
 		if err := VerifyPacketSignature(synPkt, nil); err != nil {
-			// Verification not fully implemented yet, log warning but continue
-			log.Debug().Err(err).Msg("SYN signature verification not yet complete")
+			log.Warn().Err(err).Msg("SYN signature verification failed - rejecting packet")
+			return fmt.Errorf("SYN signature verification failed: %w", err)
 		}
+		log.Debug().Msg("SYN signature verified successfully")
 	}
 
 	// Verify replay prevention (destination hash in NACKs)
@@ -1626,9 +1627,10 @@ func (s *StreamConn) handleCloseLocked(pkt *Packet) error {
 	// Verify CLOSE signature if present
 	if pkt.Flags&FlagSignatureIncluded != 0 {
 		if err := VerifyPacketSignature(pkt, nil); err != nil {
-			// Verification not fully implemented yet, log warning but continue
-			log.Debug().Err(err).Msg("CLOSE signature verification not yet complete")
+			log.Warn().Err(err).Msg("CLOSE signature verification failed - rejecting packet")
+			return fmt.Errorf("CLOSE signature verification failed: %w", err)
 		}
+		log.Debug().Msg("CLOSE signature verified successfully")
 	}
 
 	switch s.state {
@@ -1664,9 +1666,10 @@ func (s *StreamConn) handleResetLocked(pkt *Packet) error {
 	// Verify RESET signature if present
 	if pkt.Flags&FlagSignatureIncluded != 0 {
 		if err := VerifyPacketSignature(pkt, nil); err != nil {
-			// Verification not fully implemented yet, log warning but continue
-			log.Debug().Err(err).Msg("RESET signature verification not yet complete")
+			log.Warn().Err(err).Msg("RESET signature verification failed - rejecting packet")
+			return fmt.Errorf("RESET signature verification failed: %w", err)
 		}
+		log.Debug().Msg("RESET signature verified successfully")
 	}
 
 	s.setState(StateClosed)
@@ -2042,12 +2045,34 @@ const MaxNACKs = 255
 // The NACK list is bounded to MaxNACKs (255) entries to prevent unbounded memory growth
 // and because only 255 NACKs can be sent per packet per I2P streaming spec.
 // Prioritizes lower sequence numbers (earlier gaps) to avoid head-of-line blocking.
+//
+// The function limits iterations to min(gap, MaxNACKs) to prevent CPU spikes
+// when receiving packets with large sequence gaps (including wrap-around cases).
 // Must be called with s.mu held.
 func (s *StreamConn) updateNACKListLocked(receivedSeq uint32) {
-	// Add all missing sequences between recvSeq and receivedSeq to NACK list
-	// Use wrap-around safe iteration: calculate distance and iterate that many times
-	// This correctly handles sequence wrap-around (e.g., recvSeq=0xFFFFFFFE, receivedSeq=0x00000002)
-	for seq := s.recvSeq; seqLessThan(seq, receivedSeq); seq++ {
+	// Calculate the sequence gap using wrap-around arithmetic.
+	// This subtraction gives the correct distance even across wrap-around.
+	// For example: receivedSeq=0x00000005, recvSeq=0xFFFFFFFE gives gap=7
+	gap := receivedSeq - s.recvSeq
+
+	// Limit iterations to prevent CPU spike from malicious or erroneous packets
+	// with very large sequence gaps. Since we can only store MaxNACKs entries anyway,
+	// there's no benefit to iterating beyond that.
+	maxIterations := uint32(MaxNACKs)
+	if gap > maxIterations {
+		log.Debug().
+			Uint32("recvSeq", s.recvSeq).
+			Uint32("receivedSeq", receivedSeq).
+			Uint32("gap", gap).
+			Uint32("maxIterations", maxIterations).
+			Msg("large sequence gap detected, limiting NACK iteration")
+		gap = maxIterations
+	}
+
+	// Add missing sequences to NACK list
+	for i := uint32(0); i < gap; i++ {
+		seq := s.recvSeq + i
+
 		// Enforce maximum NACK list size to prevent unbounded memory growth
 		// Prioritize earlier sequence numbers (already in list) over later ones
 		if len(s.nackList) >= MaxNACKs {

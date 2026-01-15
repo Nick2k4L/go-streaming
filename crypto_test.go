@@ -178,6 +178,95 @@ func TestFindSignatureOffset(t *testing.T) {
 	})
 }
 
+// TestSignAndVerifyPacket tests the complete sign-then-verify cycle.
+func TestSignAndVerifyPacket(t *testing.T) {
+	crypto := go_i2cp.NewCrypto()
+
+	t.Run("sign with destination keypair then verify", func(t *testing.T) {
+		dest, err := go_i2cp.NewDestination(crypto)
+		require.NoError(t, err)
+
+		// Get the signing keypair from the destination
+		keyPair, err := dest.SigningKeyPair()
+		require.NoError(t, err)
+
+		pkt := &Packet{
+			SendStreamID:    1,
+			RecvStreamID:    2,
+			SequenceNum:     100,
+			AckThrough:      99,
+			Flags:           FlagSYN | FlagFromIncluded | FlagSignatureIncluded,
+			FromDestination: dest,
+			Payload:         []byte("test payload"),
+		}
+
+		// Sign the packet with the destination's keypair
+		err = SignPacket(pkt, keyPair)
+		require.NoError(t, err)
+		assert.Len(t, pkt.Signature, 64)
+
+		// Verify the signature
+		err = VerifyPacketSignature(pkt, crypto)
+		assert.NoError(t, err, "signature should verify successfully")
+	})
+
+	t.Run("modified payload fails verification", func(t *testing.T) {
+		dest, err := go_i2cp.NewDestination(crypto)
+		require.NoError(t, err)
+
+		keyPair, err := dest.SigningKeyPair()
+		require.NoError(t, err)
+
+		pkt := &Packet{
+			SendStreamID:    1,
+			RecvStreamID:    2,
+			SequenceNum:     100,
+			Flags:           FlagSYN | FlagFromIncluded | FlagSignatureIncluded,
+			FromDestination: dest,
+			Payload:         []byte("original"),
+		}
+
+		// Sign the packet
+		err = SignPacket(pkt, keyPair)
+		require.NoError(t, err)
+
+		// Modify the payload after signing
+		pkt.Payload = []byte("modified")
+
+		// Verification should fail
+		err = VerifyPacketSignature(pkt, crypto)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid signature")
+	})
+
+	t.Run("modified sequence number fails verification", func(t *testing.T) {
+		dest, err := go_i2cp.NewDestination(crypto)
+		require.NoError(t, err)
+
+		keyPair, err := dest.SigningKeyPair()
+		require.NoError(t, err)
+
+		pkt := &Packet{
+			SendStreamID:    1,
+			RecvStreamID:    2,
+			SequenceNum:     100,
+			Flags:           FlagSYN | FlagFromIncluded | FlagSignatureIncluded,
+			FromDestination: dest,
+		}
+
+		err = SignPacket(pkt, keyPair)
+		require.NoError(t, err)
+
+		// Modify the sequence number
+		pkt.SequenceNum = 999
+
+		// Verification should fail
+		err = VerifyPacketSignature(pkt, crypto)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid signature")
+	})
+}
+
 // TestSignAndMarshalCycle tests that signing doesn't break marshalling.
 func TestSignAndMarshalCycle(t *testing.T) {
 	crypto := go_i2cp.NewCrypto()
@@ -257,7 +346,7 @@ func TestVerifyPacketSignaturePrerequisites(t *testing.T) {
 		assert.Contains(t, err.Error(), "FlagSignatureIncluded not set")
 	})
 
-	t.Run("verification not fully implemented", func(t *testing.T) {
+	t.Run("verification fails with invalid signature", func(t *testing.T) {
 		dest, err := go_i2cp.NewDestination(crypto)
 		require.NoError(t, err)
 
@@ -266,13 +355,12 @@ func TestVerifyPacketSignaturePrerequisites(t *testing.T) {
 			RecvStreamID:    2,
 			Flags:           FlagSYN | FlagFromIncluded | FlagSignatureIncluded,
 			FromDestination: dest,
-			Signature:       make([]byte, 64),
+			Signature:       make([]byte, 64), // All zeros - invalid signature
 		}
 
 		err = VerifyPacketSignature(pkt, crypto)
 		assert.Error(t, err)
-		// Current implementation returns "not yet fully implemented" error
-		assert.Contains(t, err.Error(), "not yet fully implemented")
+		assert.Contains(t, err.Error(), "invalid signature")
 	})
 }
 
