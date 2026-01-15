@@ -580,7 +580,7 @@ func (s *StreamConn) waitForSynAck(ctx context.Context) (*Packet, error) {
 }
 
 // processSynAck extracts information from SYN-ACK packet.
-// Sets remote sequence number and negotiates MTU.
+// Sets remote sequence number, negotiates MTU, and initializes ackThrough.
 func (s *StreamConn) processSynAck(pkt *Packet) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -591,6 +591,14 @@ func (s *StreamConn) processSynAck(pkt *Packet) {
 	// Extract remote stream ID from SYN-ACK
 	// In SYN-ACK, SendStreamID is the peer's stream ID
 	s.remoteStreamID = pkt.SendStreamID
+
+	// Initialize ackThrough from the SYN-ACK's AckThrough field.
+	// This is critical: the SYN-ACK acknowledges our SYN (with AckThrough = our ISN).
+	// We must initialize ackThrough here so that subsequent ACK comparisons
+	// using seqGreaterThan() work correctly. Without this, ackThrough stays at 0
+	// and seqGreaterThan(largeSeqNum, 0) can return false due to signed int32 overflow
+	// in the wrap-around comparison logic.
+	s.ackThrough = pkt.AckThrough
 
 	// MTU negotiation: extract remote MTU from SYN-ACK if present
 	// Per I2P spec, server includes MaxPacketSize in SYN-ACK with FlagMaxPacketSizeIncluded flag
@@ -614,6 +622,7 @@ func (s *StreamConn) processSynAck(pkt *Packet) {
 		Uint32("ourAck", s.recvSeq).
 		Uint32("remoteStreamID", s.remoteStreamID).
 		Uint16("remoteMTU", s.remoteMTU).
+		Uint32("ackThrough", s.ackThrough).
 		Msg("processed SYN-ACK")
 }
 
@@ -1724,6 +1733,13 @@ func (s *StreamConn) handleFinalAckLocked(pkt *Packet) error {
 			Uint32("got", pkt.AckThrough).
 			Msg("ACK number mismatch")
 	}
+
+	// Initialize ackThrough from the final ACK of the 3-way handshake.
+	// This is critical: the client's ACK acknowledges our SYN-ACK (with AckThrough = our ISN).
+	// We must initialize ackThrough here so that subsequent ACK comparisons
+	// using seqGreaterThan() work correctly. Without this, ackThrough stays at 0
+	// and seqGreaterThan(small_positive, 0) can fail due to signed int32 overflow.
+	s.ackThrough = pkt.AckThrough
 
 	// Transition to ESTABLISHED
 	s.setState(StateEstablished)
