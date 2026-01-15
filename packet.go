@@ -20,7 +20,10 @@ const (
 	FlagRESET uint16 = 1 << 3
 	// FlagCLOSE indicates close - proper connection termination
 	FlagCLOSE uint16 = 1 << 4
-	// FlagECHO indicates ping/pong packet
+	// FlagECHO indicates ping/pong packet.
+	// NOTE: This flag is defined per I2P streaming spec but NOT IMPLEMENTED.
+	// The flag is reserved for future use. Applications needing ping/pong
+	// functionality should implement it at the application layer.
 	FlagECHO uint16 = 1 << 5
 	// FlagSignatureIncluded indicates signature is present
 	FlagSignatureIncluded uint16 = 1 << 6

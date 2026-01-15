@@ -240,6 +240,11 @@ type StreamConn struct {
 	readDeadline  time.Time
 	writeDeadline time.Time
 
+	// Inactivity timeout detection per I2P streaming spec
+	// Default: 90 seconds. Action: send duplicate ACK.
+	lastActivity      time.Time     // Last time data was sent or received
+	inactivityTimeout time.Duration // Inactivity timeout duration (0 = disabled)
+
 	// Connection state and synchronization
 	mu     sync.Mutex // Protects all fields above
 	closed bool
@@ -284,6 +289,14 @@ const (
 
 	// DefaultHandshakeTimeout is the timeout for waiting for SYN-ACK response.
 	DefaultHandshakeTimeout = 30 * time.Second
+
+	// DefaultInactivityTimeout is the default inactivity timeout per I2P streaming spec.
+	// Per spec: i2p.streaming.inactivityTimeout = 90*1000 (90 seconds).
+	// When no data is sent or received for this duration, a keepalive action is taken.
+	DefaultInactivityTimeout = 90 * time.Second
+
+	// InactivityCheckInterval is how often the inactivity timer checks for timeout.
+	InactivityCheckInterval = 10 * time.Second
 )
 
 // Dial initiates a connection to the specified I2P destination.
@@ -384,28 +397,30 @@ func createConnectionStruct(session *go_i2cp.Session, manager *StreamManager, de
 
 	// Initialize connection structure
 	conn := &StreamConn{
-		manager:        manager,
-		session:        session,
-		dest:           dest,
-		localPort:      localPort,
-		remotePort:     remotePort,
-		localStreamID:  localStreamID,
-		remoteStreamID: 0, // Will be set from SYN-ACK
-		sendSeq:        isn,
-		recvSeq:        0,               // Will be set from SYN-ACK
-		windowSize:     1,               // Start with slow start at 1 packet
-		cwnd:           1,               // Congestion window starts at 1
-		ssthresh:       MaxWindowSize,   // Slow start threshold at max (128 packets)
-		rtt:            8 * time.Second, // Initial RTT estimate
-		rto:            9 * time.Second, // Initial RTO per spec
-		recvBuf:        recvBuf,
-		recvChan:       make(chan *Packet, 32), // Buffer for incoming packets
-		errChan:        make(chan error, 1),
-		ctx:            ctx,
-		cancel:         cancel,
-		state:          StateInit,
-		localMTU:       uint16(mtu),
-		remoteMTU:      0, // Will be negotiated
+		manager:           manager,
+		session:           session,
+		dest:              dest,
+		localPort:         localPort,
+		remotePort:        remotePort,
+		localStreamID:     localStreamID,
+		remoteStreamID:    0, // Will be set from SYN-ACK
+		sendSeq:           isn,
+		recvSeq:           0,               // Will be set from SYN-ACK
+		windowSize:        1,               // Start with slow start at 1 packet
+		cwnd:              1,               // Congestion window starts at 1
+		ssthresh:          MaxWindowSize,   // Slow start threshold at max (128 packets)
+		rtt:               8 * time.Second, // Initial RTT estimate
+		rto:               9 * time.Second, // Initial RTO per spec
+		recvBuf:           recvBuf,
+		recvChan:          make(chan *Packet, 32), // Buffer for incoming packets
+		errChan:           make(chan error, 1),
+		ctx:               ctx,
+		cancel:            cancel,
+		state:             StateInit,
+		localMTU:          uint16(mtu),
+		remoteMTU:         0, // Will be negotiated
+		lastActivity:      time.Now(),
+		inactivityTimeout: DefaultInactivityTimeout,
 	}
 	conn.recvCond = sync.NewCond(&conn.mu)
 	conn.sendCond = sync.NewCond(&conn.mu)
@@ -455,6 +470,9 @@ func performHandshake(conn *StreamConn, timeout time.Duration) error {
 
 	// Start retransmission timer goroutine for timeout-based retransmission
 	go conn.retransmitTimer()
+
+	// Start inactivity timer goroutine for keepalive detection
+	go conn.inactivityTimer()
 
 	log.Info().
 		Str("state", conn.state.String()).
@@ -917,6 +935,8 @@ func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, re
 		sentPackets:       make(map[uint32]*sentPacket),
 		outOfOrderPackets: make(map[uint32]*Packet),
 		nackList:          make([]uint32, 0),
+		lastActivity:      time.Now(),
+		inactivityTimeout: DefaultInactivityTimeout,
 	}
 	conn.recvCond = sync.NewCond(&conn.mu)
 	conn.sendCond = sync.NewCond(&conn.mu)
@@ -1081,18 +1101,24 @@ func (s *StreamConn) Write(data []byte) (int, error) {
 				}
 
 				// Wait for either condition variable signal or timer
-				// Use a goroutine to broadcast from timer
+				// Use a done channel for clean goroutine termination
+				done := make(chan struct{})
 				go func() {
-					<-timerChan
-					s.mu.Lock()
-					if s.sendCond != nil {
-						s.sendCond.Broadcast()
+					select {
+					case <-timerChan:
+						s.mu.Lock()
+						if s.sendCond != nil {
+							s.sendCond.Broadcast()
+						}
+						s.mu.Unlock()
+					case <-done:
+						// Early termination - goroutine exits cleanly
 					}
-					s.mu.Unlock()
 				}()
 
 				s.sendCond.Wait()
 				timer.Stop()
+				close(done)
 
 				// Recheck deadline after waking
 				if !s.writeDeadline.IsZero() && time.Now().After(s.writeDeadline) {
@@ -1171,23 +1197,37 @@ func (s *StreamConn) Write(data []byte) (int, error) {
 				Msg("window full - waiting for ACKs")
 
 			// Wait with timeout if deadline is set
+			var timer *time.Timer
+			var done chan struct{}
 			if !s.writeDeadline.IsZero() {
 				timeout := time.Until(s.writeDeadline)
 				if timeout <= 0 {
 					return total - len(data), &timeoutError{}
 				}
-				// Use a timer to wake up at deadline
-				timer := time.AfterFunc(timeout, func() {
-					s.mu.Lock()
-					if s.sendCond != nil {
-						s.sendCond.Broadcast()
+				// Use a timer and done channel for clean goroutine termination
+				timer = time.NewTimer(timeout)
+				done = make(chan struct{})
+				go func() {
+					select {
+					case <-timer.C:
+						s.mu.Lock()
+						if s.sendCond != nil {
+							s.sendCond.Broadcast()
+						}
+						s.mu.Unlock()
+					case <-done:
+						// Early termination - goroutine exits cleanly
 					}
-					s.mu.Unlock()
-				})
-				defer timer.Stop()
+				}()
 			}
 
 			s.sendCond.Wait()
+
+			// Clean up timer explicitly (not using defer inside loop)
+			if timer != nil {
+				timer.Stop()
+				close(done)
+			}
 
 			// Recheck deadline after waking
 			if !s.writeDeadline.IsZero() && time.Now().After(s.writeDeadline) {
@@ -1283,26 +1323,33 @@ func (s *StreamConn) Read(buf []byte) (int, error) {
 
 		// Wait with timeout if deadline is set
 		var timer *time.Timer
+		var done chan struct{}
 		if !s.readDeadline.IsZero() {
 			timeout := time.Until(s.readDeadline)
 			if timeout <= 0 {
 				return 0, &timeoutError{}
 			}
-			// Create timer to wake up at deadline
+			// Create timer and done channel for clean goroutine termination
 			timer = time.NewTimer(timeout)
+			done = make(chan struct{})
 			go func() {
-				<-timer.C
-				s.mu.Lock()
-				s.recvCond.Broadcast()
-				s.mu.Unlock()
+				select {
+				case <-timer.C:
+					s.mu.Lock()
+					s.recvCond.Broadcast()
+					s.mu.Unlock()
+				case <-done:
+					// Early termination - goroutine exits cleanly
+				}
 			}()
 		}
 
 		s.recvCond.Wait()
 
-		// Clean up timer after waking from Wait()
+		// Clean up timer and signal goroutine termination after waking from Wait()
 		if timer != nil {
 			timer.Stop()
+			close(done)
 		}
 
 		// Recheck deadline after waking
@@ -1477,6 +1524,77 @@ func (s *StreamConn) checkRetransmissions() error {
 	return nil
 }
 
+// inactivityTimer periodically checks for connection inactivity and sends keepalive.
+// Per I2P streaming spec (i2p.streaming.inactivityTimeout), default is 90 seconds.
+// The default inactivity action is to send a duplicate ACK as a keepalive.
+// Runs until connection closes.
+func (s *StreamConn) inactivityTimer() {
+	log.Debug().Msg("inactivity timer started")
+	defer log.Debug().Msg("inactivity timer stopped")
+
+	ticker := time.NewTicker(InactivityCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.checkInactivity()
+		}
+	}
+}
+
+// checkInactivity checks if the connection has been inactive for too long.
+// If inactive beyond the timeout, sends a duplicate ACK as a keepalive.
+// This is per I2P streaming spec: i2p.streaming.inactivityAction = 1 (send duplicate ACK).
+func (s *StreamConn) checkInactivity() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Skip if inactivity timeout is disabled or connection not established
+	if s.inactivityTimeout == 0 || s.state != StateEstablished || s.closed {
+		return
+	}
+
+	// Check if we've been inactive for too long
+	inactiveDuration := time.Since(s.lastActivity)
+	if inactiveDuration < s.inactivityTimeout {
+		return
+	}
+
+	log.Debug().
+		Dur("inactive", inactiveDuration).
+		Dur("timeout", s.inactivityTimeout).
+		Msg("inactivity timeout reached - sending keepalive ACK")
+
+	// Send a duplicate ACK as keepalive (i2p.streaming.inactivityAction = 1)
+	// This signals we're still alive without consuming sequence numbers
+	if err := s.sendAckLocked(); err != nil {
+		log.Warn().Err(err).Msg("failed to send keepalive ACK")
+		return
+	}
+
+	// Update lastActivity after sending keepalive
+	s.lastActivity = time.Now()
+}
+
+// SetInactivityTimeout sets the inactivity timeout for the connection.
+// Set to 0 to disable inactivity detection.
+// Default is 90 seconds per I2P streaming spec.
+func (s *StreamConn) SetInactivityTimeout(timeout time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inactivityTimeout = timeout
+}
+
+// GetInactivityTimeout returns the current inactivity timeout setting.
+func (s *StreamConn) GetInactivityTimeout() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inactivityTimeout
+}
+
 func (s *StreamConn) receiveLoop() {
 	log.Debug().Msg("receive loop started")
 	defer log.Debug().Msg("receive loop stopped")
@@ -1503,6 +1621,9 @@ func (s *StreamConn) receiveLoop() {
 func (s *StreamConn) processPacket(pkt *Packet) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Update last activity time for inactivity detection
+	s.lastActivity = time.Now()
 
 	log.Debug().
 		Uint32("seq", pkt.SequenceNum).
@@ -1610,6 +1731,9 @@ func (s *StreamConn) handleFinalAckLocked(pkt *Packet) error {
 	// Start retransmit timer now that we're established
 	// (receiveLoop was already started in handleIncomingSYN)
 	go s.retransmitTimer()
+
+	// Start inactivity timer for keepalive detection
+	go s.inactivityTimer()
 
 	log.Info().
 		Str("state", s.state.String()).
@@ -2340,6 +2464,9 @@ func (s *StreamConn) sendPacketLocked(pkt *Packet) error {
 	if err != nil {
 		return fmt.Errorf("send message: %w", err)
 	}
+
+	// Update last activity time for inactivity detection
+	s.lastActivity = time.Now()
 
 	log.Debug().
 		Uint32("seq", pkt.SequenceNum).
