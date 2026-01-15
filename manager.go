@@ -455,8 +455,9 @@ func (sm *StreamManager) dispatchPacket(incoming *incomingPacket) {
 
 		log.Debug().
 			Uint16("destPort", incoming.destPort).
-			Msg("SYN packet for port with no listener - dropping")
-		// TODO: Send RESET packet
+			Msg("SYN packet for port with no listener - sending RESET")
+		// Send RESET to notify peer that no listener exists on this port
+		sm.sendResetPacket(incoming.srcDest, pkt.SendStreamID, incoming.destPort, incoming.srcPort)
 		return
 	}
 
@@ -475,8 +476,9 @@ func (sm *StreamManager) dispatchPacket(incoming *incomingPacket) {
 	log.Debug().
 		Uint16("localPort", incoming.destPort).
 		Uint16("remotePort", incoming.srcPort).
-		Msg("packet for unknown connection - dropping")
-	// TODO: Send RESET packet
+		Msg("packet for unknown connection - sending RESET")
+	// Send RESET to notify peer that this connection doesn't exist
+	sm.sendResetPacket(incoming.srcDest, pkt.SendStreamID, incoming.destPort, incoming.srcPort)
 }
 
 // closeAllConnections closes all registered connections.
@@ -515,6 +517,84 @@ func (sm *StreamManager) handleLeaseSet2(session *go_i2cp.Session, leaseSet *go_
 	sm.leaseSetOnce.Do(func() {
 		close(sm.leaseSetReady)
 	})
+}
+
+// sendResetPacket sends a RESET packet to notify a peer that their connection
+// or SYN request is invalid. Per I2P streaming spec, RESET should be sent for:
+//   - Packets for unknown connections
+//   - SYN packets for ports with no listener
+//   - Connection limit exceeded (when implemented)
+//
+// The RESET packet contains:
+//   - SendStreamID: 0 (we don't have a local stream for this)
+//   - RecvStreamID: The sender's stream ID (so they know which connection to reset)
+//   - Flags: FlagRESET
+//   - Optional signature if session has signing capability
+//
+// Parameters:
+//   - dest: The remote destination to send the RESET to
+//   - remoteStreamID: The stream ID from the received packet (becomes RecvStreamID)
+//   - localPort: Our local port (for logging)
+//   - remotePort: Remote port to send to
+func (sm *StreamManager) sendResetPacket(dest *go_i2cp.Destination, remoteStreamID uint32, localPort, remotePort uint16) {
+	if dest == nil {
+		log.Warn().Msg("cannot send RESET: destination is nil")
+		return
+	}
+
+	if sm.session == nil {
+		log.Warn().Msg("cannot send RESET: no I2CP session")
+		return
+	}
+
+	// Create RESET packet
+	// SendStreamID is 0 because we don't have a local stream for this connection
+	// RecvStreamID is the remote's stream ID so they know which connection to reset
+	pkt := &Packet{
+		SendStreamID: 0,              // No local stream
+		RecvStreamID: remoteStreamID, // Remote's stream ID
+		SequenceNum:  0,              // Not relevant for RESET
+		AckThrough:   0,              // Not relevant for RESET
+		Flags:        FlagRESET,
+	}
+
+	// Add signature and FROM destination if available
+	pkt.Flags |= FlagSignatureIncluded | FlagFromIncluded
+	pkt.FromDestination = sm.session.Destination()
+
+	keyPair, err := sm.session.SigningKeyPair()
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to get signing key pair for RESET packet - sending unsigned")
+		// Remove signature flag since we can't sign
+		pkt.Flags &^= FlagSignatureIncluded
+	} else if err := SignPacket(pkt, keyPair); err != nil {
+		log.Warn().Err(err).Msg("failed to sign RESET packet - sending unsigned")
+		pkt.Flags &^= FlagSignatureIncluded
+	}
+
+	// Marshal the packet
+	data, err := pkt.Marshal()
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to marshal RESET packet")
+		return
+	}
+
+	// Send via I2CP
+	stream := go_i2cp.NewStream(data)
+	err = sm.session.SendMessage(dest, 6, localPort, remotePort, stream, 0)
+	if err != nil {
+		log.Warn().Err(err).
+			Uint16("localPort", localPort).
+			Uint16("remotePort", remotePort).
+			Msg("failed to send RESET packet")
+		return
+	}
+
+	log.Debug().
+		Uint32("remoteStreamID", remoteStreamID).
+		Uint16("localPort", localPort).
+		Uint16("remotePort", remotePort).
+		Msg("sent RESET packet")
 }
 
 // Close shuts down the stream manager and all connections.
