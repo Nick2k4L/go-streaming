@@ -613,20 +613,31 @@ func (s *StreamConn) waitForSynAck(ctx context.Context) (*Packet, error) {
 		case <-ctx.Done():
 			return nil, fmt.Errorf("timeout waiting for SYN-ACK: %w", ctx.Err())
 		case pkt := <-s.recvChan:
-			// Check if this is a SYN-ACK packet
-			if pkt.Flags&FlagSYN != 0 && pkt.Flags&FlagACK != 0 {
-				log.Debug().
-					Uint32("seq", pkt.SequenceNum).
-					Uint32("ack", pkt.AckThrough).
-					Msg("received SYN-ACK")
+			if s.isSynAckPacket(pkt) {
 				return pkt, nil
 			}
-			// Not a SYN-ACK, keep waiting
-			log.Debug().
-				Uint16("flags", pkt.Flags).
-				Msg("received non-SYN-ACK packet while waiting, ignoring")
+			s.logIgnoredPacket(pkt)
 		}
 	}
+}
+
+// isSynAckPacket checks if the packet is a SYN-ACK response.
+func (s *StreamConn) isSynAckPacket(pkt *Packet) bool {
+	if pkt.Flags&FlagSYN != 0 && pkt.Flags&FlagACK != 0 {
+		log.Debug().
+			Uint32("seq", pkt.SequenceNum).
+			Uint32("ack", pkt.AckThrough).
+			Msg("received SYN-ACK")
+		return true
+	}
+	return false
+}
+
+// logIgnoredPacket logs when a non-SYN-ACK packet is received during handshake.
+func (s *StreamConn) logIgnoredPacket(pkt *Packet) {
+	log.Debug().
+		Uint16("flags", pkt.Flags).
+		Msg("received non-SYN-ACK packet while waiting, ignoring")
 }
 
 // processSynAck extracts information from SYN-ACK packet.
@@ -2246,9 +2257,20 @@ func (s *StreamConn) manageChokeStateLocked() {
 	}
 
 	s.lastBufferCheck = currentBufferUsed
-	bufferSize := int64(s.recvBuf.Size())
-	bufferUsage := float64(currentBufferUsed) / float64(bufferSize)
+	bufferUsage := s.calculateBufferUsage(currentBufferUsed)
 
+	s.updateChokeStateForUsage(bufferUsage)
+}
+
+// calculateBufferUsage computes the buffer usage ratio.
+func (s *StreamConn) calculateBufferUsage(currentBufferUsed int64) float64 {
+	bufferSize := int64(s.recvBuf.Size())
+	return float64(currentBufferUsed) / float64(bufferSize)
+}
+
+// updateChokeStateForUsage sends choke or unchoke signals based on buffer usage thresholds.
+// Must be called with s.mu held.
+func (s *StreamConn) updateChokeStateForUsage(bufferUsage float64) {
 	if bufferUsage > 0.8 && !s.sendingChoke {
 		if err := s.sendChokeSignalLocked(); err != nil {
 			log.Warn().Err(err).Msg("failed to send choke signal")
