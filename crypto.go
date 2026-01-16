@@ -79,6 +79,25 @@ func SignPacket(pkt *Packet, keyPair *go_i2cp.Ed25519KeyPair) error {
 //
 // Returns error if verification fails or prerequisites are not met.
 func VerifyPacketSignature(pkt *Packet, crypto *go_i2cp.Crypto) error {
+	if err := validateSignaturePrerequisites(pkt); err != nil {
+		return err
+	}
+
+	originalSig := pkt.Signature
+	data, err := marshalWithZeroedSignature(pkt)
+	if err != nil {
+		return err
+	}
+
+	if !pkt.FromDestination.VerifySignature(data, originalSig) {
+		return fmt.Errorf("signature verification failed: invalid signature")
+	}
+
+	return nil
+}
+
+// validateSignaturePrerequisites checks that signature verification can proceed.
+func validateSignaturePrerequisites(pkt *Packet) error {
 	if pkt.FromDestination == nil {
 		return fmt.Errorf("cannot verify: no FROM destination")
 	}
@@ -88,41 +107,35 @@ func VerifyPacketSignature(pkt *Packet, crypto *go_i2cp.Crypto) error {
 	if pkt.Flags&FlagSignatureIncluded == 0 {
 		return fmt.Errorf("cannot verify: FlagSignatureIncluded not set")
 	}
+	return nil
+}
 
-	// Save original signature before zeroing for verification
+// marshalWithZeroedSignature marshals the packet with signature zeroed for verification.
+// Restores the original signature after marshaling.
+func marshalWithZeroedSignature(pkt *Packet) ([]byte, error) {
 	originalSig := pkt.Signature
 	sigLen := len(originalSig)
 
-	// Zero the signature field for marshaling (signature covers packet with zeroed sig)
+	// Zero signature for marshaling
 	pkt.Signature = make([]byte, sigLen)
-
-	// Marshal the packet with zeroed signature
 	data, err := pkt.Marshal()
-
-	// Restore original signature immediately
-	pkt.Signature = originalSig
+	pkt.Signature = originalSig // Restore immediately
 
 	if err != nil {
-		return fmt.Errorf("marshal for verification: %w", err)
+		return nil, fmt.Errorf("marshal for verification: %w", err)
 	}
 
-	// Find signature location in marshaled data and ensure it's zeroed
+	// Zero signature bytes in marshaled data
 	sigOffset := findSignatureOffset(pkt)
 	if sigOffset+sigLen > len(data) {
-		return fmt.Errorf("signature offset+length (%d) exceeds data length (%d)", sigOffset+sigLen, len(data))
+		return nil, fmt.Errorf("signature offset+length (%d) exceeds data length (%d)", sigOffset+sigLen, len(data))
 	}
 
-	// Zero out the signature bytes in the marshaled data (should already be zero, but ensure)
 	for i := 0; i < sigLen; i++ {
 		data[sigOffset+i] = 0
 	}
 
-	// Use the destination's VerifySignature method to verify
-	if !pkt.FromDestination.VerifySignature(data, originalSig) {
-		return fmt.Errorf("signature verification failed: invalid signature")
-	}
-
-	return nil
+	return data, nil
 }
 
 // validateOfflineSignatureInputs checks that all required parameters are non-nil.

@@ -537,52 +537,15 @@ func (sm *StreamManager) handleLeaseSet2(session *go_i2cp.Session, leaseSet *go_
 //   - localPort: Our local port (for logging)
 //   - remotePort: Remote port to send to
 func (sm *StreamManager) sendResetPacket(dest *go_i2cp.Destination, remoteStreamID uint32, localPort, remotePort uint16) {
-	if dest == nil {
-		log.Warn().Msg("cannot send RESET: destination is nil")
+	if err := sm.validateResetPrerequisites(dest); err != nil {
+		log.Warn().Err(err).Msg("cannot send RESET")
 		return
 	}
 
-	if sm.session == nil {
-		log.Warn().Msg("cannot send RESET: no I2CP session")
-		return
-	}
+	pkt := sm.createResetPacket(remoteStreamID)
+	sm.signResetPacket(pkt)
 
-	// Create RESET packet
-	// SendStreamID is 0 because we don't have a local stream for this connection
-	// RecvStreamID is the remote's stream ID so they know which connection to reset
-	pkt := &Packet{
-		SendStreamID: 0,              // No local stream
-		RecvStreamID: remoteStreamID, // Remote's stream ID
-		SequenceNum:  0,              // Not relevant for RESET
-		AckThrough:   0,              // Not relevant for RESET
-		Flags:        FlagRESET,
-	}
-
-	// Add signature and FROM destination if available
-	pkt.Flags |= FlagSignatureIncluded | FlagFromIncluded
-	pkt.FromDestination = sm.session.Destination()
-
-	keyPair, err := sm.session.SigningKeyPair()
-	if err != nil {
-		log.Warn().Err(err).Msg("failed to get signing key pair for RESET packet - sending unsigned")
-		// Remove signature flag since we can't sign
-		pkt.Flags &^= FlagSignatureIncluded
-	} else if err := SignPacket(pkt, keyPair); err != nil {
-		log.Warn().Err(err).Msg("failed to sign RESET packet - sending unsigned")
-		pkt.Flags &^= FlagSignatureIncluded
-	}
-
-	// Marshal the packet
-	data, err := pkt.Marshal()
-	if err != nil {
-		log.Warn().Err(err).Msg("failed to marshal RESET packet")
-		return
-	}
-
-	// Send via I2CP
-	stream := go_i2cp.NewStream(data)
-	err = sm.session.SendMessage(dest, 6, localPort, remotePort, stream, 0)
-	if err != nil {
+	if err := sm.sendPacketToDest(pkt, dest, localPort, remotePort); err != nil {
 		log.Warn().Err(err).
 			Uint16("localPort", localPort).
 			Uint16("remotePort", remotePort).
@@ -595,6 +558,55 @@ func (sm *StreamManager) sendResetPacket(dest *go_i2cp.Destination, remoteStream
 		Uint16("localPort", localPort).
 		Uint16("remotePort", remotePort).
 		Msg("sent RESET packet")
+}
+
+// validateResetPrerequisites checks that dest and session are valid for sending RESET.
+func (sm *StreamManager) validateResetPrerequisites(dest *go_i2cp.Destination) error {
+	if dest == nil {
+		return fmt.Errorf("destination is nil")
+	}
+	if sm.session == nil {
+		return fmt.Errorf("no I2CP session")
+	}
+	return nil
+}
+
+// createResetPacket builds a RESET packet with the given remote stream ID.
+func (sm *StreamManager) createResetPacket(remoteStreamID uint32) *Packet {
+	return &Packet{
+		SendStreamID:    0,              // No local stream
+		RecvStreamID:    remoteStreamID, // Remote's stream ID
+		SequenceNum:     0,              // Not relevant for RESET
+		AckThrough:      0,              // Not relevant for RESET
+		Flags:           FlagRESET | FlagSignatureIncluded | FlagFromIncluded,
+		FromDestination: sm.session.Destination(),
+	}
+}
+
+// signResetPacket attempts to sign the packet, clearing signature flag on failure.
+func (sm *StreamManager) signResetPacket(pkt *Packet) {
+	keyPair, err := sm.session.SigningKeyPair()
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to get signing key pair for RESET packet - sending unsigned")
+		pkt.Flags &^= FlagSignatureIncluded
+		return
+	}
+
+	if err := SignPacket(pkt, keyPair); err != nil {
+		log.Warn().Err(err).Msg("failed to sign RESET packet - sending unsigned")
+		pkt.Flags &^= FlagSignatureIncluded
+	}
+}
+
+// sendPacketToDest marshals and sends a packet to the specified destination.
+func (sm *StreamManager) sendPacketToDest(pkt *Packet, dest *go_i2cp.Destination, localPort, remotePort uint16) error {
+	data, err := pkt.Marshal()
+	if err != nil {
+		return fmt.Errorf("marshal packet: %w", err)
+	}
+
+	stream := go_i2cp.NewStream(data)
+	return sm.session.SendMessage(dest, 6, localPort, remotePort, stream, 0)
 }
 
 // Close shuts down the stream manager and all connections.

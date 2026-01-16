@@ -359,43 +359,46 @@ func DialWithMTU(session *go_i2cp.Session, dest *go_i2cp.Destination, localPort,
 	return conn, performHandshake(conn, timeout)
 }
 
-// createConnectionStruct creates a new StreamConn structure without performing the handshake.
-func createConnectionStruct(session *go_i2cp.Session, manager *StreamManager, dest *go_i2cp.Destination, localPort, remotePort uint16, mtu int) (*StreamConn, error) {
+// validateConnectionParams checks MTU bounds, session and destination validity.
+// Returns an error if any parameter is invalid.
+func validateConnectionParams(session *go_i2cp.Session, dest *go_i2cp.Destination, mtu int) error {
 	if mtu < MinMTU {
-		return nil, fmt.Errorf("MTU %d is below minimum %d", mtu, MinMTU)
+		return fmt.Errorf("MTU %d is below minimum %d", mtu, MinMTU)
 	}
 	if mtu > DefaultMTU && mtu != ECIESMTU {
-		return nil, fmt.Errorf("MTU %d exceeds recommended maximum %d (use %d for ECIES)", mtu, DefaultMTU, ECIESMTU)
+		return fmt.Errorf("MTU %d exceeds recommended maximum %d (use %d for ECIES)", mtu, DefaultMTU, ECIESMTU)
 	}
 	if session == nil {
-		return nil, fmt.Errorf("session cannot be nil")
+		return fmt.Errorf("session cannot be nil")
 	}
 	if dest == nil {
-		return nil, fmt.Errorf("destination cannot be nil")
+		return fmt.Errorf("destination cannot be nil")
 	}
+	return nil
+}
 
-	// Generate random ISN for security
+// generateConnectionIdentifiers creates the initial sequence number and stream ID.
+// Returns ISN, localStreamID, and any error.
+func generateConnectionIdentifiers() (uint32, uint32, error) {
 	isn, err := generateISN()
 	if err != nil {
-		return nil, fmt.Errorf("generate ISN: %w", err)
+		return 0, 0, fmt.Errorf("generate ISN: %w", err)
 	}
 
-	// Generate random stream ID per I2P streaming spec
 	localStreamID, err := generateISN()
 	if err != nil {
-		return nil, fmt.Errorf("generate stream ID: %w", err)
+		return 0, 0, fmt.Errorf("generate stream ID: %w", err)
 	}
 
-	// Create receive buffer
-	recvBuf, err := circbuf.NewBuffer(64 * 1024) // 64KB receive buffer
-	if err != nil {
-		return nil, fmt.Errorf("create receive buffer: %w", err)
-	}
+	return isn, localStreamID, nil
+}
 
-	// Create context for receive loop
-	ctx, cancel := context.WithCancel(context.Background())
+// initializeStreamConn creates and initializes a StreamConn with the given parameters.
+// Sets up all fields, buffers, channels, and condition variables.
+func initializeStreamConn(session *go_i2cp.Session, manager *StreamManager, dest *go_i2cp.Destination,
+	localPort, remotePort uint16, mtu int, isn, localStreamID uint32, recvBuf *circbuf.Buffer,
+	ctx context.Context, cancel context.CancelFunc) *StreamConn {
 
-	// Initialize connection structure
 	conn := &StreamConn{
 		manager:           manager,
 		session:           session,
@@ -424,6 +427,30 @@ func createConnectionStruct(session *go_i2cp.Session, manager *StreamManager, de
 	}
 	conn.recvCond = sync.NewCond(&conn.mu)
 	conn.sendCond = sync.NewCond(&conn.mu)
+
+	return conn
+}
+
+// createConnectionStruct creates a new StreamConn structure without performing the handshake.
+func createConnectionStruct(session *go_i2cp.Session, manager *StreamManager, dest *go_i2cp.Destination, localPort, remotePort uint16, mtu int) (*StreamConn, error) {
+	if err := validateConnectionParams(session, dest, mtu); err != nil {
+		return nil, err
+	}
+
+	isn, localStreamID, err := generateConnectionIdentifiers()
+	if err != nil {
+		return nil, err
+	}
+
+	recvBuf, err := circbuf.NewBuffer(64 * 1024) // 64KB receive buffer
+	if err != nil {
+		return nil, fmt.Errorf("create receive buffer: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	conn := initializeStreamConn(session, manager, dest, localPort, remotePort, mtu,
+		isn, localStreamID, recvBuf, ctx, cancel)
 
 	log.Info().
 		Uint16("localPort", localPort).
@@ -493,31 +520,55 @@ func (s *StreamConn) sendSYN() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Generate destination hash for replay prevention
-	// Hash the remote destination and extract 8 uint32 values
+	nacks, err := s.generateReplayPreventionNACKs()
+	if err != nil {
+		return err
+	}
+
+	pkt := s.buildSYNPacket(nacks)
+
+	if err := s.signAndSendPacket(pkt); err != nil {
+		return err
+	}
+
+	s.logSYNSent(pkt, len(nacks))
+	s.sendSeq++ // SYN consumes one sequence number
+
+	return nil
+}
+
+// generateReplayPreventionNACKs creates the 8-NACK array from destination hash.
+// Per I2P spec, this prevents replay attacks by binding SYN to specific destination.
+func (s *StreamConn) generateReplayPreventionNACKs() ([]uint32, error) {
 	destHash, err := hashDestination(s.dest)
 	if err != nil {
-		return fmt.Errorf("hash destination: %w", err)
+		return nil, fmt.Errorf("hash destination: %w", err)
 	}
+
 	nacks := make([]uint32, 8)
 	for i := 0; i < 8; i++ {
 		nacks[i] = binary.BigEndian.Uint32(destHash[i*4 : (i+1)*4])
 	}
 
-	pkt := &Packet{
+	return nacks, nil
+}
+
+// buildSYNPacket constructs the SYN packet with all required fields.
+func (s *StreamConn) buildSYNPacket(nacks []uint32) *Packet {
+	return &Packet{
 		SendStreamID:    0,               // Always 0 in initial SYN per spec
 		RecvStreamID:    s.localStreamID, // Our stream ID for peer to use
 		SequenceNum:     s.sendSeq,
 		AckThrough:      0, // No ACK yet
 		Flags:           FlagSYN | FlagMaxPacketSizeIncluded | FlagSignatureIncluded | FlagFromIncluded,
-		MaxPacketSize:   s.localMTU, // Advertise our MTU
-		NACKs:           nacks,      // Replay prevention
+		MaxPacketSize:   s.localMTU,
+		NACKs:           nacks,
 		FromDestination: s.session.Destination(),
-		// Payload could contain initial data (allowed per spec)
-		// For MVP, keep it simple - no initial data in SYN
 	}
+}
 
-	// Sign the packet with session's signing key
+// signAndSendPacket signs the packet and sends it to the remote destination.
+func (s *StreamConn) signAndSendPacket(pkt *Packet) error {
 	keyPair, err := s.session.SigningKeyPair()
 	if err != nil {
 		return fmt.Errorf("get signing key: %w", err)
@@ -532,11 +583,15 @@ func (s *StreamConn) sendSYN() error {
 	}
 
 	stream := go_i2cp.NewStream(data)
-	err = s.session.SendMessage(s.dest, 6, s.localPort, s.remotePort, stream, 0)
-	if err != nil {
+	if err := s.session.SendMessage(s.dest, 6, s.localPort, s.remotePort, stream, 0); err != nil {
 		return fmt.Errorf("send SYN message: %w", err)
 	}
 
+	return nil
+}
+
+// logSYNSent logs the SYN packet details.
+func (s *StreamConn) logSYNSent(pkt *Packet, nackCount int) {
 	log.Debug().
 		Uint32("seq", pkt.SequenceNum).
 		Uint16("flags", pkt.Flags).
@@ -544,13 +599,8 @@ func (s *StreamConn) sendSYN() error {
 		Uint32("localStreamID", s.localStreamID).
 		Uint16("localPort", s.localPort).
 		Uint16("remotePort", s.remotePort).
-		Int("nacks", len(nacks)).
+		Int("nacks", nackCount).
 		Msg("sent SYN")
-
-	// SYN consumes one sequence number - increment for next packet
-	s.sendSeq++
-
-	return nil
 }
 
 // waitForSynAck polls for incoming SYN-ACK packet.
