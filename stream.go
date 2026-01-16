@@ -833,15 +833,9 @@ func (l *StreamListener) Close() error {
 //  7. Queue connection for Accept()
 //
 // The connection will transition to ESTABLISHED when it receives the final ACK.
-func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, remoteDest *go_i2cp.Destination) error {
-	log.Debug().
-		Uint32("remoteSeq", synPkt.SequenceNum).
-		Uint16("remotePort", remotePort).
-		Uint16("localPort", l.localPort).
-		Msg("received SYN")
-
-	// Prefer FromDestination from the packet if available (more reliable)
-	// Fall back to remoteDest from I2CP callback if not present
+// validateSYNSource validates the source destination from a SYN packet.
+// Returns the peer destination or an error if no source is available.
+func (l *StreamListener) validateSYNSource(synPkt *Packet, remoteDest *go_i2cp.Destination) (*go_i2cp.Destination, error) {
 	peerDest := remoteDest
 	if synPkt.Flags&FlagFromIncluded != 0 && synPkt.FromDestination != nil {
 		peerDest = synPkt.FromDestination
@@ -850,87 +844,96 @@ func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, re
 
 	if peerDest == nil {
 		log.Error().Msg("SYN packet has no source destination - cannot reply")
-		return fmt.Errorf("SYN packet has no source destination")
+		return nil, fmt.Errorf("SYN packet has no source destination")
+	}
+	return peerDest, nil
+}
+
+// verifySYNSignature verifies the signature on a SYN packet if present.
+// Returns an error if verification fails.
+func (l *StreamListener) verifySYNSignature(synPkt *Packet) error {
+	if synPkt.Flags&FlagSignatureIncluded == 0 {
+		return nil
+	}
+	if err := VerifyPacketSignature(synPkt, nil); err != nil {
+		log.Warn().Err(err).Msg("SYN signature verification failed - rejecting packet")
+		return fmt.Errorf("SYN signature verification failed: %w", err)
+	}
+	log.Debug().Msg("SYN signature verified successfully")
+	return nil
+}
+
+// verifySYNReplayPrevention verifies the replay prevention NACKs in a SYN packet.
+// Returns an error if verification fails.
+func (l *StreamListener) verifySYNReplayPrevention(synPkt *Packet) error {
+	if len(synPkt.NACKs) != 8 {
+		return nil
 	}
 
-	// Verify SYN signature if present
-	if synPkt.Flags&FlagSignatureIncluded != 0 {
-		if err := VerifyPacketSignature(synPkt, nil); err != nil {
-			log.Warn().Err(err).Msg("SYN signature verification failed - rejecting packet")
-			return fmt.Errorf("SYN signature verification failed: %w", err)
+	ourHash, err := hashDestination(l.session.Destination())
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to hash destination for replay prevention check")
+		return nil
+	}
+
+	for i := 0; i < 8; i++ {
+		expected := binary.BigEndian.Uint32(ourHash[i*4 : (i+1)*4])
+		if synPkt.NACKs[i] != expected {
+			log.Warn().Msg("SYN replay prevention check failed - rejecting")
+			return fmt.Errorf("SYN replay prevention check failed")
 		}
-		log.Debug().Msg("SYN signature verified successfully")
 	}
+	log.Debug().Msg("SYN replay prevention check passed")
+	return nil
+}
 
-	// Verify replay prevention (destination hash in NACKs)
-	// SYN packets should contain 8 NACKs with SHA-256(our_destination) split into uint32s
-	if len(synPkt.NACKs) == 8 {
-		ourHash, err := hashDestination(l.session.Destination())
-		if err != nil {
-			log.Warn().Err(err).Msg("failed to hash destination for replay prevention check")
-		} else {
-			for i := 0; i < 8; i++ {
-				expected := binary.BigEndian.Uint32(ourHash[i*4 : (i+1)*4])
-				if synPkt.NACKs[i] != expected {
-					log.Warn().Msg("SYN replay prevention check failed - rejecting")
-					return fmt.Errorf("SYN replay prevention check failed")
-				}
-			}
-			log.Debug().Msg("SYN replay prevention check passed")
-		}
+// extractRemoteMTU extracts the MTU from a SYN packet.
+// Returns DefaultMTU if not present.
+func extractRemoteMTU(synPkt *Packet, localMTU uint16) uint16 {
+	if synPkt.Flags&FlagMaxPacketSizeIncluded != 0 && synPkt.MaxPacketSize > 0 {
+		log.Debug().
+			Uint16("remoteMTU", synPkt.MaxPacketSize).
+			Uint16("localMTU", localMTU).
+			Msg("extracted MTU from SYN")
+		return synPkt.MaxPacketSize
 	}
+	log.Warn().Msg("SYN missing MTU, using default")
+	return DefaultMTU
+}
 
-	// Generate our ISN
+// createIncomingConnection creates a new StreamConn for an incoming SYN.
+// Returns the connection and any error.
+func (l *StreamListener) createIncomingConnection(synPkt *Packet, remotePort uint16, peerDest *go_i2cp.Destination) (*StreamConn, error) {
 	isn, err := generateISN()
 	if err != nil {
-		return fmt.Errorf("generate ISN: %w", err)
+		return nil, fmt.Errorf("generate ISN: %w", err)
 	}
 
-	// Generate our stream ID
 	localStreamID, err := generateStreamID()
 	if err != nil {
-		return fmt.Errorf("generate stream ID: %w", err)
+		return nil, fmt.Errorf("generate stream ID: %w", err)
 	}
 
-	// Extract remote stream ID from SYN packet
-	// In SYN, RecvStreamID is the peer's stream ID
-	remoteStreamID := synPkt.RecvStreamID
-
-	// Extract remote MTU from SYN packet if present
-	var remoteMTU uint16 = DefaultMTU
-	if synPkt.Flags&FlagMaxPacketSizeIncluded != 0 && synPkt.MaxPacketSize > 0 {
-		remoteMTU = synPkt.MaxPacketSize
-		log.Debug().
-			Uint16("remoteMTU", remoteMTU).
-			Uint16("localMTU", l.localMTU).
-			Msg("extracted MTU from SYN")
-	} else {
-		log.Warn().Msg("SYN missing MTU, using default")
-	}
-
-	// Create receive buffer
 	recvBuf, err := circbuf.NewBuffer(64 * 1024)
 	if err != nil {
-		return fmt.Errorf("create receive buffer: %w", err)
+		return nil, fmt.Errorf("create receive buffer: %w", err)
 	}
 
-	// Create context for receive loop
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Create connection structure
 	conn := &StreamConn{
 		manager:           l.manager,
 		session:           l.session,
-		dest:              peerDest, // Use the validated peer destination
+		dest:              peerDest,
 		localPort:         l.localPort,
 		remotePort:        remotePort,
 		localStreamID:     localStreamID,
-		remoteStreamID:    remoteStreamID,
+		remoteStreamID:    synPkt.RecvStreamID,
 		sendSeq:           isn,
-		recvSeq:           synPkt.SequenceNum + 1, // Next expected sequence
-		windowSize:        1,                      // Start with slow start at 1 packet
-		cwnd:              1,                      // Congestion window starts at 1
-		ssthresh:          MaxWindowSize,          // Slow start threshold at max (128 packets)
+		recvSeq:           synPkt.SequenceNum + 1,
+		windowSize:        1,
+		cwnd:              1,
+		ssthresh:          MaxWindowSize,
 		rtt:               8 * time.Second,
 		rto:               9 * time.Second,
 		recvBuf:           recvBuf,
@@ -940,7 +943,7 @@ func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, re
 		cancel:            cancel,
 		state:             StateInit,
 		localMTU:          l.localMTU,
-		remoteMTU:         remoteMTU, // Extracted from SYN packet
+		remoteMTU:         extractRemoteMTU(synPkt, l.localMTU),
 		sentPackets:       make(map[uint32]*sentPacket),
 		outOfOrderPackets: make(map[uint32]*Packet),
 		nackList:          make([]uint32, 0),
@@ -950,12 +953,58 @@ func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, re
 	conn.recvCond = sync.NewCond(&conn.mu)
 	conn.sendCond = sync.NewCond(&conn.mu)
 
-	// Register connection with manager for packet routing
+	return conn, nil
+}
+
+// queueConnectionForAccept queues a connection for Accept() and starts the receive loop.
+// Returns an error if the accept queue is full.
+func (l *StreamListener) queueConnectionForAccept(conn *StreamConn, remotePort uint16) error {
+	select {
+	case l.acceptChan <- conn:
+		log.Debug().
+			Uint16("localPort", l.localPort).
+			Uint16("remotePort", remotePort).
+			Msg("queued connection for Accept()")
+		return nil
+	default:
+		log.Warn().Msg("accept channel full, dropping connection")
+		conn.cancel()
+		if l.manager != nil {
+			l.manager.UnregisterConnection(l.localPort, remotePort)
+		}
+		return fmt.Errorf("accept queue full")
+	}
+}
+
+func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, remoteDest *go_i2cp.Destination) error {
+	log.Debug().
+		Uint32("remoteSeq", synPkt.SequenceNum).
+		Uint16("remotePort", remotePort).
+		Uint16("localPort", l.localPort).
+		Msg("received SYN")
+
+	peerDest, err := l.validateSYNSource(synPkt, remoteDest)
+	if err != nil {
+		return err
+	}
+
+	if err := l.verifySYNSignature(synPkt); err != nil {
+		return err
+	}
+
+	if err := l.verifySYNReplayPrevention(synPkt); err != nil {
+		return err
+	}
+
+	conn, err := l.createIncomingConnection(synPkt, remotePort, peerDest)
+	if err != nil {
+		return err
+	}
+
 	if l.manager != nil {
 		l.manager.RegisterConnection(l.localPort, remotePort, conn)
 	}
 
-	// Send SYN-ACK
 	if err := conn.sendSynAck(); err != nil {
 		if l.manager != nil {
 			l.manager.UnregisterConnection(l.localPort, remotePort)
@@ -963,31 +1012,10 @@ func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, re
 		return fmt.Errorf("send SYN-ACK: %w", err)
 	}
 
-	// Transition to SYN_RCVD state
 	conn.setState(StateSynRcvd)
-
-	// Start receive loop BEFORE queuing for Accept - this allows the ACK to be processed
-	// The receiveLoop will handle the transition from SYN_RCVD to ESTABLISHED
 	go conn.receiveLoop()
 
-	// Queue connection for Accept()
-	// The connection will transition to ESTABLISHED when it receives the final ACK
-	select {
-	case l.acceptChan <- conn:
-		log.Debug().
-			Uint16("localPort", l.localPort).
-			Uint16("remotePort", remotePort).
-			Msg("queued connection for Accept()")
-	default:
-		log.Warn().Msg("accept channel full, dropping connection")
-		conn.cancel() // Stop the receive loop
-		if l.manager != nil {
-			l.manager.UnregisterConnection(l.localPort, remotePort)
-		}
-		return fmt.Errorf("accept queue full")
-	}
-
-	return nil
+	return l.queueConnectionForAccept(conn, remotePort)
 }
 
 // sendSynAck sends a SYN-ACK packet in response to a SYN.
@@ -1065,6 +1093,25 @@ func (s *StreamConn) checkWriteDeadlineLocked() error {
 	return nil
 }
 
+// waitWithTimerSignal waits on sendCond while a timer goroutine broadcasts on timeout.
+// Returns the done channel that must be closed after sendCond.Wait() returns.
+// Must be called with s.mu held.
+func (s *StreamConn) waitWithTimerSignal(timerChan <-chan time.Time) chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-timerChan:
+			s.mu.Lock()
+			if s.sendCond != nil {
+				s.sendCond.Broadcast()
+			}
+			s.mu.Unlock()
+		case <-done:
+		}
+	}()
+	return done
+}
+
 // waitForChokeCondVar waits for the choke period to expire using condition variables.
 // Returns an error if deadline exceeded or connection state becomes invalid.
 // Must be called with s.mu held.
@@ -1079,19 +1126,7 @@ func (s *StreamConn) waitForChokeCondVar() error {
 			Msg("peer is choked - waiting for unchoke or timeout")
 
 		timer, timerChan := s.createChokeTimer()
-
-		done := make(chan struct{})
-		go func() {
-			select {
-			case <-timerChan:
-				s.mu.Lock()
-				if s.sendCond != nil {
-					s.sendCond.Broadcast()
-				}
-				s.mu.Unlock()
-			case <-done:
-			}
-		}()
+		done := s.waitWithTimerSignal(timerChan)
 
 		s.sendCond.Wait()
 		timer.Stop()
@@ -1218,18 +1253,7 @@ func (s *StreamConn) setupWindowWaitTimer() (*time.Timer, chan struct{}) {
 	}
 
 	timer := time.NewTimer(timeout)
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-timer.C:
-			s.mu.Lock()
-			if s.sendCond != nil {
-				s.sendCond.Broadcast()
-			}
-			s.mu.Unlock()
-		case <-done:
-		}
-	}()
+	done := s.waitWithTimerSignal(timer.C)
 	return timer, done
 }
 
@@ -1323,6 +1347,120 @@ func (s *StreamConn) Write(data []byte) (int, error) {
 //
 // MVP implementation:
 //   - Simple blocking using sync.Cond
+//
+// validateReadStateLocked checks if the connection has data or is closed with EOF.
+// Returns io.EOF if connection is closed with no data.
+// Must be called with s.mu held.
+func (s *StreamConn) validateReadStateLocked() error {
+	if s.closed && s.recvBuf.TotalWritten() == 0 {
+		return io.EOF
+	}
+	return nil
+}
+
+// checkReadDeadlineLocked checks if the read deadline has been exceeded.
+// Returns a timeoutError if the deadline has passed, nil otherwise.
+// Must be called with s.mu held.
+func (s *StreamConn) checkReadDeadlineLocked() error {
+	if !s.readDeadline.IsZero() && time.Now().After(s.readDeadline) {
+		return &timeoutError{}
+	}
+	return nil
+}
+
+// setupReadTimer creates a timer for read deadline and returns cleanup resources.
+// Returns nil timer if no deadline is set. Must be called with s.mu held.
+func (s *StreamConn) setupReadTimer() (*time.Timer, chan struct{}) {
+	if s.readDeadline.IsZero() {
+		return nil, nil
+	}
+
+	timeout := time.Until(s.readDeadline)
+	if timeout <= 0 {
+		return nil, nil
+	}
+
+	timer := time.NewTimer(timeout)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-timer.C:
+			s.mu.Lock()
+			s.recvCond.Broadcast()
+			s.mu.Unlock()
+		case <-done:
+		}
+	}()
+	return timer, done
+}
+
+// waitForReadDataLocked blocks until data is available or deadline expires.
+// Returns an error if timeout or closed. Must be called with s.mu held.
+func (s *StreamConn) waitForReadDataLocked() error {
+	for s.recvBuf.TotalWritten() == 0 && !s.closed {
+		if err := s.checkReadDeadlineLocked(); err != nil {
+			return err
+		}
+
+		timer, done := s.setupReadTimer()
+		if timer == nil && !s.readDeadline.IsZero() {
+			return &timeoutError{}
+		}
+
+		s.recvCond.Wait()
+
+		if timer != nil {
+			timer.Stop()
+			close(done)
+		}
+
+		if err := s.checkReadDeadlineLocked(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// consumeBufferDataLocked reads data from the receive buffer and handles remaining data.
+// Returns the number of bytes read and any error. Must be called with s.mu held.
+func (s *StreamConn) consumeBufferDataLocked(buf []byte) (int, error) {
+	data := s.recvBuf.Bytes()
+	n := copy(buf, data)
+
+	s.recvBuf.Reset()
+	if n < len(data) {
+		remaining := data[n:]
+		if _, err := s.recvBuf.Write(remaining); err != nil {
+			return n, fmt.Errorf("write remaining data: %w", err)
+		}
+	}
+
+	log.Debug().
+		Int("bytes", n).
+		Msg("read data")
+	return n, nil
+}
+
+// handlePostReadActionsLocked handles buffer delivery and choke signals after reading.
+// Must be called with s.mu held.
+func (s *StreamConn) handlePostReadActionsLocked() {
+	if len(s.outOfOrderPackets) > 0 {
+		s.deliverBufferedPacketsLocked()
+	}
+
+	if s.sendingChoke {
+		currentBufferUsed := s.recvBuf.TotalWritten()
+		bufferSize := int64(s.recvBuf.Size())
+		bufferUsage := float64(currentBufferUsed) / float64(bufferSize)
+
+		if bufferUsage < 0.3 {
+			if err := s.sendUnchokeSignalLocked(); err != nil {
+				log.Warn().Err(err).Msg("failed to send unchoke signal after read")
+			}
+		}
+	}
+}
+
 //   - Use circbuf.Bytes() and manual management (no built-in Read method)
 //   - No timeout support yet (Phase 5+)
 //
@@ -1343,97 +1481,24 @@ func (s *StreamConn) Read(buf []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Check if connection closed with no data
-	if s.closed && s.recvBuf.TotalWritten() == 0 {
-		return 0, io.EOF
+	if err := s.validateReadStateLocked(); err != nil {
+		return 0, err
 	}
 
-	// Block until data is available or deadline expires
-	for s.recvBuf.TotalWritten() == 0 && !s.closed {
-		// Check read deadline before waiting
-		if !s.readDeadline.IsZero() && time.Now().After(s.readDeadline) {
-			return 0, &timeoutError{}
-		}
-
-		// Wait with timeout if deadline is set
-		var timer *time.Timer
-		var done chan struct{}
-		if !s.readDeadline.IsZero() {
-			timeout := time.Until(s.readDeadline)
-			if timeout <= 0 {
-				return 0, &timeoutError{}
-			}
-			// Create timer and done channel for clean goroutine termination
-			timer = time.NewTimer(timeout)
-			done = make(chan struct{})
-			go func() {
-				select {
-				case <-timer.C:
-					s.mu.Lock()
-					s.recvCond.Broadcast()
-					s.mu.Unlock()
-				case <-done:
-					// Early termination - goroutine exits cleanly
-				}
-			}()
-		}
-
-		s.recvCond.Wait()
-
-		// Clean up timer and signal goroutine termination after waking from Wait()
-		if timer != nil {
-			timer.Stop()
-			close(done)
-		}
-
-		// Recheck deadline after waking
-		if !s.readDeadline.IsZero() && time.Now().After(s.readDeadline) {
-			return 0, &timeoutError{}
-		}
+	if err := s.waitForReadDataLocked(); err != nil {
+		return 0, err
 	}
 
-	// Check if closed while waiting - return io.EOF
-	if s.closed && s.recvBuf.TotalWritten() == 0 {
-		return 0, io.EOF
+	if err := s.validateReadStateLocked(); err != nil {
+		return 0, err
 	}
 
-	// Get available data from circular buffer
-	data := s.recvBuf.Bytes()
-	n := copy(buf, data)
-
-	// Reset buffer and write back any remaining data
-	s.recvBuf.Reset()
-	if n < len(data) {
-		remaining := data[n:]
-		if _, err := s.recvBuf.Write(remaining); err != nil {
-			return n, fmt.Errorf("write remaining data: %w", err)
-		}
+	n, err := s.consumeBufferDataLocked(buf)
+	if err != nil {
+		return n, err
 	}
 
-	log.Debug().
-		Int("bytes", n).
-		Msg("read data")
-
-	// After freeing buffer space, try to deliver any buffered packets
-	// that couldn't be delivered before due to buffer being full
-	if len(s.outOfOrderPackets) > 0 {
-		s.deliverBufferedPacketsLocked()
-	}
-
-	// Check if we should send unchoke signal after freeing buffer space
-	if s.sendingChoke {
-		currentBufferUsed := s.recvBuf.TotalWritten()
-		bufferSize := int64(s.recvBuf.Size())
-		bufferUsage := float64(currentBufferUsed) / float64(bufferSize)
-
-		// Unchoke at 30% to resume flow with hysteresis
-		if bufferUsage < 0.3 {
-			if err := s.sendUnchokeSignalLocked(); err != nil {
-				log.Warn().Err(err).Msg("failed to send unchoke signal after read")
-			}
-		}
-	}
-
+	s.handlePostReadActionsLocked()
 	return n, nil
 }
 
