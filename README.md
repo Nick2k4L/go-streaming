@@ -177,7 +177,7 @@ System integration tests with real I2P router:
 go test -tags=system -v -timeout=5m
 ```
 
-Tests verify real I2CP connections, data transfer, and connection multiplexing. Auto-skip if router unavailable.
+Tests verify real I2CP connections, data transfer, and connection multiplexing. Tests that require a router will fail if no I2P router is available.
 
 ## Documentation
 
