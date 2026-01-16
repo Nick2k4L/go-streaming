@@ -23,7 +23,7 @@ func newTestStreamConnForChoke(t *testing.T, bufferSize int) *StreamConn {
 		recvSeq:           100,
 		recvBuf:           recvBuf,
 		outOfOrderPackets: make(map[uint32]*Packet),
-		nackList:          []uint32{},
+		nackList:          make(map[uint32]struct{}),
 	}
 	s.recvCond = sync.NewCond(&s.mu)
 	s.sendCond = sync.NewCond(&s.mu)
@@ -234,7 +234,9 @@ func TestChokeWithNACKs(t *testing.T) {
 
 	// Add some NACKs
 	s.mu.Lock()
-	s.nackList = []uint32{100, 101, 102}
+	s.nackList[100] = struct{}{}
+	s.nackList[101] = struct{}{}
+	s.nackList[102] = struct{}{}
 
 	err := s.sendChokeSignalLocked()
 	s.mu.Unlock()

@@ -143,7 +143,7 @@ func CreateTestStreamConn(t *testing.T) *StreamConn {
 		remoteMTU:         DefaultMTU,
 		sentPackets:       make(map[uint32]*sentPacket),
 		outOfOrderPackets: make(map[uint32]*Packet),
-		nackList:          make([]uint32, 0),
+		nackList:          make(map[uint32]struct{}),
 	}
 	conn.recvCond = sync.NewCond(&conn.mu)
 	conn.sendCond = sync.NewCond(&conn.mu)

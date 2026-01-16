@@ -18,7 +18,7 @@ func newTestStreamConnForRetransmit(t *testing.T) *StreamConn {
 		sendSeq:           1,
 		recvBuf:           recvBuf,
 		outOfOrderPackets: make(map[uint32]*Packet),
-		nackList:          []uint32{},
+		nackList:          make(map[uint32]struct{}),
 	}
 	s.recvCond = sync.NewCond(&s.mu)
 	s.sendCond = sync.NewCond(&s.mu)

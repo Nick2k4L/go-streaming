@@ -23,7 +23,7 @@ func newTestStreamConnForTimeout() *StreamConn {
 		ackThrough:        0,
 		sentPackets:       make(map[uint32]*sentPacket),
 		outOfOrderPackets: make(map[uint32]*Packet),
-		nackList:          make([]uint32, 0),
+		nackList:          make(map[uint32]struct{}),
 		recvBuf:           recvBuf,
 		recvChan:          make(chan *Packet, 10),
 		errChan:           make(chan error, 1),

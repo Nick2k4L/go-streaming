@@ -214,8 +214,9 @@ type StreamConn struct {
 
 	// Out-of-order packet handling for selective ACK (NACK)
 	// Tracks packets received out of sequence to enable retransmission requests
-	outOfOrderPackets map[uint32]*Packet // Buffered packets received out of order
-	nackList          []uint32           // Sequence numbers we haven't received yet (for NACK field)
+	outOfOrderPackets map[uint32]*Packet  // Buffered packets received out of order
+	nackList          map[uint32]struct{} // Sequence numbers we haven't received yet (for NACK field)
+	// Using map for O(1) lookup and removal operations
 
 	// Sent packet tracking for retransmission on NACK reception
 	// Maps sequence number to sent packet info for unacknowledged packets
@@ -1005,7 +1006,7 @@ func (l *StreamListener) initConnectionState(synPkt *Packet, remotePort uint16, 
 		remoteMTU:         extractRemoteMTU(synPkt, l.localMTU),
 		sentPackets:       make(map[uint32]*sentPacket),
 		outOfOrderPackets: make(map[uint32]*Packet),
-		nackList:          make([]uint32, 0),
+		nackList:          make(map[uint32]struct{}),
 		lastActivity:      time.Now(),
 		inactivityTimeout: DefaultInactivityTimeout,
 	}
@@ -2426,7 +2427,7 @@ func (s *StreamConn) addMissingSequencesToNACKListLocked(gap uint32) {
 		}
 
 		if s.shouldAddToNACKListLocked(seq) {
-			s.nackList = append(s.nackList, seq)
+			s.nackList[seq] = struct{}{}
 			log.Debug().
 				Uint32("seq", seq).
 				Int("nackCount", len(s.nackList)).
@@ -2437,35 +2438,54 @@ func (s *StreamConn) addMissingSequencesToNACKListLocked(gap uint32) {
 
 // shouldAddToNACKListLocked checks if a sequence should be added to the NACK list.
 // Returns false if the sequence is already buffered or already in the NACK list.
+// Uses O(1) map lookup for efficiency.
 // Caller must hold s.mu.
 func (s *StreamConn) shouldAddToNACKListLocked(seq uint32) bool {
 	if _, buffered := s.outOfOrderPackets[seq]; buffered {
 		return false
 	}
 
-	for _, nack := range s.nackList {
-		if nack == seq {
-			return false
-		}
-	}
-
-	return true
+	// O(1) map lookup instead of O(n) slice scan
+	_, exists := s.nackList[seq]
+	return !exists
 }
 
 // removeFromNACKListLocked removes a sequence number from the NACK list.
+// Uses O(1) map delete for efficiency.
 // Must be called with s.mu held.
 func (s *StreamConn) removeFromNACKListLocked(seq uint32) {
-	for i, nack := range s.nackList {
-		if nack == seq {
-			// Remove from slice
-			s.nackList = append(s.nackList[:i], s.nackList[i+1:]...)
-			log.Debug().
-				Uint32("seq", seq).
-				Int("remaining", len(s.nackList)).
-				Msg("removed from NACK list")
-			return
+	if _, exists := s.nackList[seq]; exists {
+		delete(s.nackList, seq)
+		log.Debug().
+			Uint32("seq", seq).
+			Int("remaining", len(s.nackList)).
+			Msg("removed from NACK list")
+	}
+}
+
+// getNACKListSliceLocked converts the NACK map to a slice for packet building.
+// Returns up to maxNacks sequence numbers. The order is not guaranteed due to
+// map iteration, but this is acceptable per I2P streaming spec as NACKs just
+// indicate missing sequences without ordering requirements.
+// Must be called with s.mu held.
+func (s *StreamConn) getNACKListSliceLocked(maxNacks int) []uint32 {
+	if len(s.nackList) == 0 {
+		return nil
+	}
+
+	count := len(s.nackList)
+	if count > maxNacks {
+		count = maxNacks
+	}
+
+	result := make([]uint32, 0, count)
+	for seq := range s.nackList {
+		result = append(result, seq)
+		if len(result) >= count {
+			break
 		}
 	}
+	return result
 }
 
 // cleanupAckedPacketsLocked removes ACKed packets from the sent packet tracking.
@@ -2571,13 +2591,7 @@ func (s *StreamConn) sendAckLocked() error {
 	// Include NACKs if we have any gaps in received sequences
 	// Limit to MaxNACKs per packet as per I2P streaming spec
 	if len(s.nackList) > 0 {
-		maxNacks := MaxNACKs
-		if len(s.nackList) < maxNacks {
-			maxNacks = len(s.nackList)
-		}
-
-		pkt.NACKs = make([]uint32, maxNacks)
-		copy(pkt.NACKs, s.nackList[:maxNacks])
+		pkt.NACKs = s.getNACKListSliceLocked(MaxNACKs)
 
 		log.Debug().
 			Int("nackCount", len(pkt.NACKs)).
@@ -2603,12 +2617,7 @@ func (s *StreamConn) sendChokeSignalLocked() error {
 
 	// Include NACKs if we have any gaps (even when choked, request missing packets)
 	if len(s.nackList) > 0 {
-		maxNacks := MaxNACKs
-		if len(s.nackList) < maxNacks {
-			maxNacks = len(s.nackList)
-		}
-		pkt.NACKs = make([]uint32, maxNacks)
-		copy(pkt.NACKs, s.nackList[:maxNacks])
+		pkt.NACKs = s.getNACKListSliceLocked(MaxNACKs)
 	}
 
 	s.sendingChoke = true
@@ -2635,12 +2644,7 @@ func (s *StreamConn) sendUnchokeSignalLocked() error {
 
 	// Include NACKs if we have any gaps
 	if len(s.nackList) > 0 {
-		maxNacks := MaxNACKs
-		if len(s.nackList) < maxNacks {
-			maxNacks = len(s.nackList)
-		}
-		pkt.NACKs = make([]uint32, maxNacks)
-		copy(pkt.NACKs, s.nackList[:maxNacks])
+		pkt.NACKs = s.getNACKListSliceLocked(MaxNACKs)
 	}
 
 	s.sendingChoke = false

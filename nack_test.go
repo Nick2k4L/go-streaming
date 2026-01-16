@@ -8,6 +8,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// nackMapToSlice converts a NACK map to a slice for test assertions.
+func nackMapToSlice(m map[uint32]struct{}) []uint32 {
+	result := make([]uint32, 0, len(m))
+	for seq := range m {
+		result = append(result, seq)
+	}
+	return result
+}
+
+// nackMapContains checks if a sequence exists in the NACK map.
+func nackMapContains(m map[uint32]struct{}, seq uint32) bool {
+	_, exists := m[seq]
+	return exists
+}
+
 // newTestStreamConn creates a minimal StreamConn for testing NACK functionality.
 func newTestStreamConn(recvSeq uint32) *StreamConn {
 	recvBuf, _ := circbuf.NewBuffer(1024)
@@ -15,7 +30,7 @@ func newTestStreamConn(recvSeq uint32) *StreamConn {
 		recvSeq:           recvSeq,
 		recvBuf:           recvBuf,
 		outOfOrderPackets: make(map[uint32]*Packet),
-		nackList:          []uint32{},
+		nackList:          make(map[uint32]struct{}),
 	}
 	s.recvCond = sync.NewCond(&s.mu)
 	return s
@@ -122,7 +137,7 @@ func TestNACKGeneration(t *testing.T) {
 			}
 
 			// Verify NACK list contains expected missing sequences
-			require.ElementsMatch(t, tt.expectedNACKs, s.nackList,
+			require.ElementsMatch(t, tt.expectedNACKs, nackMapToSlice(s.nackList),
 				"NACK list should contain all missing sequences")
 		})
 	}
@@ -236,7 +251,7 @@ func TestNACKListUpdates(t *testing.T) {
 
 	// Verify NACKs added
 	expectedNACKs := []uint32{100, 101, 102, 103, 104}
-	require.ElementsMatch(t, expectedNACKs, s.nackList)
+	require.ElementsMatch(t, expectedNACKs, nackMapToSlice(s.nackList))
 
 	// Receive packet 102 (should remove from NACK list but not deliver yet)
 	pkt102 := &Packet{
@@ -247,13 +262,13 @@ func TestNACKListUpdates(t *testing.T) {
 	require.NoError(t, err)
 
 	// 102 should not be in NACK list anymore (it's buffered)
-	require.NotContains(t, s.nackList, uint32(102))
+	require.False(t, nackMapContains(s.nackList, 102))
 
 	// But 100, 101, 103, 104 should still be there
-	require.Contains(t, s.nackList, uint32(100))
-	require.Contains(t, s.nackList, uint32(101))
-	require.Contains(t, s.nackList, uint32(103))
-	require.Contains(t, s.nackList, uint32(104))
+	require.True(t, nackMapContains(s.nackList, 100))
+	require.True(t, nackMapContains(s.nackList, 101))
+	require.True(t, nackMapContains(s.nackList, 103))
+	require.True(t, nackMapContains(s.nackList, 104))
 
 	// Receive packet 100
 	pkt100 := &Packet{
@@ -264,7 +279,7 @@ func TestNACKListUpdates(t *testing.T) {
 	require.NoError(t, err)
 
 	// 100 should be removed from NACK list
-	require.NotContains(t, s.nackList, uint32(100))
+	require.False(t, nackMapContains(s.nackList, 100))
 
 	// recvSeq should advance to 101
 	require.Equal(t, uint32(101), s.recvSeq)
@@ -283,7 +298,7 @@ func TestNACKInclusionInACKPackets(t *testing.T) {
 		recvSeq:           100,
 		recvBuf:           recvBuf,
 		outOfOrderPackets: make(map[uint32]*Packet),
-		nackList:          []uint32{},
+		nackList:          make(map[uint32]struct{}),
 		localStreamID:     1,
 		remoteStreamID:    2,
 		sendSeq:           50,
@@ -292,7 +307,9 @@ func TestNACKInclusionInACKPackets(t *testing.T) {
 	s.sendCond = sync.NewCond(&s.mu)
 
 	// Add some NACKs manually
-	s.nackList = []uint32{100, 101, 102}
+	s.nackList[100] = struct{}{}
+	s.nackList[101] = struct{}{}
+	s.nackList[102] = struct{}{}
 
 	// Send ACK
 	err = s.sendAckLocked()
@@ -300,7 +317,7 @@ func TestNACKInclusionInACKPackets(t *testing.T) {
 
 	// Note: In a real test with session mocking, we'd verify the packet
 	// For this test, we just verify no error and NACK list is preserved
-	require.Equal(t, []uint32{100, 101, 102}, s.nackList)
+	require.Equal(t, 3, len(s.nackList))
 }
 
 // TestNACKLimit255 verifies that no more than 255 NACKs are included per packet.
@@ -315,7 +332,7 @@ func TestNACKLimit255(t *testing.T) {
 		recvSeq:           100,
 		recvBuf:           recvBuf,
 		outOfOrderPackets: make(map[uint32]*Packet),
-		nackList:          []uint32{},
+		nackList:          make(map[uint32]struct{}),
 		localStreamID:     1,
 		remoteStreamID:    2,
 		sendSeq:           50,
@@ -325,7 +342,7 @@ func TestNACKLimit255(t *testing.T) {
 
 	// Add 300 NACKs
 	for i := uint32(0); i < 300; i++ {
-		s.nackList = append(s.nackList, i)
+		s.nackList[i] = struct{}{}
 	}
 
 	// Send ACK
@@ -361,8 +378,8 @@ func TestPacketLossRecoveryScenario(t *testing.T) {
 	require.Equal(t, int64(3), s.recvBuf.TotalWritten(), "packets 100-102 delivered")
 
 	// Should have NACKs for 103 and 107
-	require.Contains(t, s.nackList, uint32(103))
-	require.Contains(t, s.nackList, uint32(107))
+	require.True(t, nackMapContains(s.nackList, 103))
+	require.True(t, nackMapContains(s.nackList, 107))
 
 	// Should have buffered 104-106, 108-110
 	for _, seq := range []uint32{104, 105, 106, 108, 109, 110} {
@@ -383,10 +400,10 @@ func TestPacketLossRecoveryScenario(t *testing.T) {
 	require.Equal(t, int64(7), s.recvBuf.TotalWritten(), "packets 100-106 delivered")
 
 	// 103 should be removed from NACK list
-	require.NotContains(t, s.nackList, uint32(103))
+	require.False(t, nackMapContains(s.nackList, 103))
 
 	// 107 should still be in NACK list
-	require.Contains(t, s.nackList, uint32(107))
+	require.True(t, nackMapContains(s.nackList, 107))
 
 	// Retransmit packet 107
 	pkt107 := &Packet{
@@ -461,24 +478,31 @@ func BenchmarkInOrderDelivery(b *testing.B) {
 // TestNACKRemovalOnPacketArrival verifies that specific helper function behavior.
 func TestNACKRemovalOnPacketArrival(t *testing.T) {
 	s := &StreamConn{
-		nackList: []uint32{100, 101, 102, 103, 104},
+		nackList: map[uint32]struct{}{
+			100: {}, 101: {}, 102: {}, 103: {}, 104: {},
+		},
 	}
 
 	// Remove middle element
 	s.removeFromNACKListLocked(102)
-	require.Equal(t, []uint32{100, 101, 103, 104}, s.nackList)
+	require.Equal(t, 4, len(s.nackList))
+	require.False(t, nackMapContains(s.nackList, 102))
 
 	// Remove first element
 	s.removeFromNACKListLocked(100)
-	require.Equal(t, []uint32{101, 103, 104}, s.nackList)
+	require.Equal(t, 3, len(s.nackList))
+	require.False(t, nackMapContains(s.nackList, 100))
 
 	// Remove last element
 	s.removeFromNACKListLocked(104)
-	require.Equal(t, []uint32{101, 103}, s.nackList)
+	require.Equal(t, 2, len(s.nackList))
+	require.False(t, nackMapContains(s.nackList, 104))
 
 	// Remove non-existent (should not crash)
 	s.removeFromNACKListLocked(999)
-	require.Equal(t, []uint32{101, 103}, s.nackList)
+	require.Equal(t, 2, len(s.nackList))
+	require.True(t, nackMapContains(s.nackList, 101))
+	require.True(t, nackMapContains(s.nackList, 103))
 }
 
 // TestUpdateNACKListDeduplication verifies no duplicate NACKs are added.
@@ -499,9 +523,9 @@ func TestUpdateNACKListDeduplication(t *testing.T) {
 	// Should have 100-104, 106-107 (7 total)
 	require.Equal(t, 7, len(s.nackList))
 
-	// Verify no duplicates
+	// Verify no duplicates (maps naturally deduplicate)
 	seen := make(map[uint32]bool)
-	for _, nack := range s.nackList {
+	for nack := range s.nackList {
 		require.False(t, seen[nack], "duplicate NACK found: %d", nack)
 		seen[nack] = true
 	}
@@ -572,7 +596,7 @@ func TestUpdateNACKListLargeGap(t *testing.T) {
 
 			// Verify the first few NACKs start at recvSeq
 			if nackCount > 0 {
-				require.Contains(t, s.nackList, tt.recvSeq,
+				require.True(t, nackMapContains(s.nackList, tt.recvSeq),
 					"First NACK should be recvSeq=%d", tt.recvSeq)
 			}
 		})
@@ -587,8 +611,7 @@ func TestUpdateNACKListWrapAroundCorrectness(t *testing.T) {
 
 	s.mu.Lock()
 	s.updateNACKListLocked(0x00000002)
-	nackList := make([]uint32, len(s.nackList))
-	copy(nackList, s.nackList)
+	nackList := nackMapToSlice(s.nackList)
 	s.mu.Unlock()
 
 	// Expected NACKs: 0xFFFFFFFE, 0xFFFFFFFF, 0x00000000, 0x00000001
