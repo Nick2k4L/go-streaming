@@ -459,8 +459,11 @@ func (sm *StreamManager) logDispatchingPacket(pkt *Packet, incoming *incomingPac
 }
 
 // isSynPacket checks if the packet is a SYN packet for a new connection.
+// Per I2P streaming spec, the initial SYN has SendStreamID=0 (unknown) since
+// the receiver hasn't yet assigned their stream ID. A SYN-ACK response will
+// have SendStreamID > 0.
 func (sm *StreamManager) isSynPacket(pkt *Packet) bool {
-	return pkt.Flags&FlagSYN != 0 && pkt.Flags&FlagACK == 0
+	return pkt.Flags&FlagSYN != 0 && pkt.SendStreamID == 0
 }
 
 // handleSynPacket handles a SYN packet by routing to a listener or sending RESET.

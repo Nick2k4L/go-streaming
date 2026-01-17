@@ -79,7 +79,7 @@ func TestSlowStartExponentialGrowth(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pkt := &Packet{
-				Flags:      FlagACK,
+				Flags:      0, // No flags needed - ackThrough always valid per spec
 				AckThrough: tt.ackThrough,
 			}
 
@@ -112,7 +112,7 @@ func TestSlowStartReachesThreshold(t *testing.T) {
 	acks := []uint32{1, 2, 4}
 	for _, ack := range acks {
 		pkt := &Packet{
-			Flags:      FlagACK,
+			Flags:      0, // No flags needed - ackThrough always valid per spec
 			AckThrough: ack,
 		}
 		s.mu.Lock()
@@ -171,7 +171,7 @@ func TestCongestionAvoidanceLinearGrowth(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pkt := &Packet{
-				Flags:      FlagACK,
+				Flags:      0, // No flags needed - ackThrough always valid per spec
 				AckThrough: tt.ackThrough,
 			}
 
@@ -199,7 +199,7 @@ func TestWindowSizeMaximum(t *testing.T) {
 	s.sentPackets[1] = &sentPacket{data: []byte{}, sentTime: time.Now()}
 
 	pkt := &Packet{
-		Flags:      FlagACK,
+		Flags:      0, // No flags needed - ackThrough always valid per spec
 		AckThrough: 1,
 	}
 
@@ -230,7 +230,7 @@ func TestSlowStartWithMultipleAcks(t *testing.T) {
 
 	for i, ack := range ackSequence {
 		pkt := &Packet{
-			Flags:      FlagACK,
+			Flags:      0, // No flags needed - ackThrough always valid per spec
 			AckThrough: ack,
 		}
 
@@ -253,7 +253,7 @@ func TestSlowStartNoAckIncrease(t *testing.T) {
 
 	// Send ACK with same ackThrough - no window growth
 	pkt := &Packet{
-		Flags:      FlagACK,
+		Flags:      0, // No flags needed - ackThrough always valid per spec
 		AckThrough: 5,
 	}
 
@@ -278,7 +278,7 @@ func TestSlowStartWithNACKs(t *testing.T) {
 
 	// ACK packet 3 with NACK for packet 2
 	pkt := &Packet{
-		Flags:      FlagACK,
+		Flags:      0, // No flags needed - ackThrough always valid per spec
 		AckThrough: 3,
 		NACKs:      []uint32{2}, // Request retransmission of packet 2
 	}
@@ -303,7 +303,7 @@ func TestCongestionAvoidanceAtMaxWindow(t *testing.T) {
 	s.sentPackets[1] = &sentPacket{data: []byte{}, sentTime: time.Now()}
 
 	pkt := &Packet{
-		Flags:      FlagACK,
+		Flags:      0, // No flags needed - ackThrough always valid per spec
 		AckThrough: 1,
 	}
 
@@ -332,7 +332,7 @@ func TestSlowStartThresholdBoundary(t *testing.T) {
 
 	// One more ACK should reach threshold: 32 -> 64
 	pkt := &Packet{
-		Flags:      FlagACK,
+		Flags:      0, // No flags needed - ackThrough always valid per spec
 		AckThrough: 33,
 	}
 
@@ -350,7 +350,7 @@ func TestSlowStartThresholdBoundary(t *testing.T) {
 
 	// Next ACK should use linear growth: 64 -> 65
 	pkt2 := &Packet{
-		Flags:      FlagACK,
+		Flags:      0, // No flags needed - ackThrough always valid per spec
 		AckThrough: 34,
 	}
 

@@ -221,7 +221,7 @@ func TestResendDelayFieldSize(t *testing.T) {
 			SendStreamID: 1,
 			RecvStreamID: 2,
 			SequenceNum:  100,
-			Flags:        FlagACK,
+			Flags:        0, // No flags needed - ackThrough always valid per spec
 			ResendDelay:  255, // Max value for uint8
 		}
 
@@ -374,9 +374,9 @@ func TestSequenceNumberIncrement(t *testing.T) {
 	t.Run("sequence numbers in packet headers", func(t *testing.T) {
 		// Create packets with incrementing sequence numbers
 		packets := []*Packet{
-			{SendStreamID: 1, RecvStreamID: 2, SequenceNum: 100, Flags: FlagACK},
-			{SendStreamID: 1, RecvStreamID: 2, SequenceNum: 101, Flags: FlagACK},
-			{SendStreamID: 1, RecvStreamID: 2, SequenceNum: 102, Flags: FlagACK},
+			{SendStreamID: 1, RecvStreamID: 2, SequenceNum: 100, Flags: 0},
+			{SendStreamID: 1, RecvStreamID: 2, SequenceNum: 101, Flags: 0},
+			{SendStreamID: 1, RecvStreamID: 2, SequenceNum: 102, Flags: 0},
 		}
 
 		for i, pkt := range packets {
@@ -398,7 +398,7 @@ func TestSequenceNumberIncrement(t *testing.T) {
 			SendStreamID: 1,
 			RecvStreamID: 2,
 			SequenceNum:  1000,
-			Flags:        FlagACK,
+			Flags:        0, // No flags needed - ackThrough always valid per spec
 			Payload:      []byte("small"), // 5 bytes
 		}
 
@@ -407,7 +407,7 @@ func TestSequenceNumberIncrement(t *testing.T) {
 			SendStreamID: 1,
 			RecvStreamID: 2,
 			SequenceNum:  1001, // Incremented by 1, not by payload size
-			Flags:        FlagACK,
+			Flags:        0, // No flags needed - ackThrough always valid per spec
 			Payload:      make([]byte, 1024), // 1024 bytes
 		}
 
@@ -422,7 +422,7 @@ func TestSequenceNumberIncrement(t *testing.T) {
 			RecvStreamID: 2,
 			SequenceNum:  500,
 			AckThrough:   499, // Acknowledging previous sequence
-			Flags:        FlagACK,
+			Flags:        0, // No flags needed - ackThrough always valid per spec
 		}
 
 		data, err := pkt.Marshal()
@@ -512,7 +512,7 @@ func TestPacketSizeValidation(t *testing.T) {
 			RecvStreamID:    2,
 			SequenceNum:     100,
 			AckThrough:      99,
-			Flags:           FlagACK | FlagDelayRequested | FlagMaxPacketSizeIncluded | FlagFromIncluded | FlagSignatureIncluded,
+			Flags:           FlagDelayRequested | FlagMaxPacketSizeIncluded | FlagFromIncluded | FlagSignatureIncluded,
 			OptionalDelay:   1000,
 			MaxPacketSize:   1500,
 			FromDestination: dest,

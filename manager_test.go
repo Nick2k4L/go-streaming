@@ -118,7 +118,7 @@ func TestStreamManager_ConnectionRegistration(t *testing.T) {
 		RecvStreamID: uint32(localPort),
 		SequenceNum:  100,
 		AckThrough:   0,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 		Payload:      []byte("test data"),
 	}
 
@@ -290,7 +290,7 @@ func TestStreamManager_SendResetPacket_UnknownConnection(t *testing.T) {
 		RecvStreamID: uint32(localPort),
 		SequenceNum:  100,
 		AckThrough:   50,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 		Payload:      []byte("test data for unknown connection"),
 	}
 
@@ -423,7 +423,7 @@ func TestStreamManager_DispatchPacket_RESETOnUnknownConnection(t *testing.T) {
 		RecvStreamID: uint32(localPort),
 		SequenceNum:  50,
 		AckThrough:   25,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 		Payload:      []byte("data for unknown connection"),
 	}
 

@@ -8,33 +8,64 @@ import (
 	go_i2cp "github.com/go-i2p/go-i2cp"
 )
 
-// Packet flags per I2P streaming specification
+// Packet flags per I2P streaming specification.
+// Bit order: 15....0 (15 is MSB) per https://geti2p.net/spec/streaming
 const (
-	// FlagSYN indicates synchronize - used in connection setup
+	// FlagSYN (bit 0): SYNCHRONIZE - Similar to TCP SYN.
+	// Set in the initial packet and in the first response.
+	// FROM_INCLUDED and SIGNATURE_INCLUDED must also be set.
 	FlagSYN uint16 = 1 << 0
-	// FlagACK indicates acknowledgment
-	FlagACK uint16 = 1 << 1
-	// FlagFIN indicates finish - no more data (deprecated, use CLOSE)
-	FlagFIN uint16 = 1 << 2
-	// FlagRESET indicates reset - abort connection
-	FlagRESET uint16 = 1 << 3
-	// FlagCLOSE indicates close - proper connection termination
-	FlagCLOSE uint16 = 1 << 4
-	// FlagECHO indicates ping/pong packet.
-	// NOTE: This flag is defined per I2P streaming spec but NOT IMPLEMENTED.
-	// The flag is reserved for future use. Applications needing ping/pong
-	// functionality should implement it at the application layer.
-	FlagECHO uint16 = 1 << 5
-	// FlagSignatureIncluded indicates signature is present
-	FlagSignatureIncluded uint16 = 1 << 6
-	// FlagFromIncluded indicates from field is present
-	FlagFromIncluded uint16 = 1 << 7
-	// FlagDelayRequested indicates optional delay field is present (bit 6)
-	FlagDelayRequested uint16 = 1 << 8
-	// FlagMaxPacketSizeIncluded indicates MTU is present (bit 7)
-	FlagMaxPacketSizeIncluded uint16 = 1 << 9
-	// FlagOfflineSignature indicates offline signature (LS2) is present
-	FlagOfflineSignature uint16 = 1 << 10
+
+	// FlagCLOSE (bit 1): Similar to TCP FIN.
+	// If the response to a SYNCHRONIZE fits in a single message,
+	// the response will contain both SYNCHRONIZE and CLOSE.
+	// SIGNATURE_INCLUDED must also be set.
+	FlagCLOSE uint16 = 1 << 1
+
+	// FlagRESET (bit 2): Abnormal close.
+	// SIGNATURE_INCLUDED must also be set.
+	FlagRESET uint16 = 1 << 2
+
+	// FlagSignatureIncluded (bit 3): Signature is present in option data.
+	// Currently sent only with SYNCHRONIZE, CLOSE, and RESET, where it is required,
+	// and with ECHO, where it is required for a ping.
+	FlagSignatureIncluded uint16 = 1 << 3
+
+	// FlagSignatureRequested (bit 4): Unused.
+	// Requests every packet in the other direction to have SIGNATURE_INCLUDED.
+	FlagSignatureRequested uint16 = 1 << 4
+
+	// FlagFromIncluded (bit 5): FROM destination is present in option data.
+	// Currently sent only with SYNCHRONIZE, where it is required,
+	// and with ECHO, where it is required for a ping.
+	FlagFromIncluded uint16 = 1 << 5
+
+	// FlagDelayRequested (bit 6): Optional delay field is present.
+	// 2 bytes indicating how many milliseconds the sender wants the recipient
+	// to wait before sending any more data. A value greater than 60000 indicates choking.
+	FlagDelayRequested uint16 = 1 << 6
+
+	// FlagMaxPacketSizeIncluded (bit 7): MTU is present in option data.
+	// The maximum length of the payload. Sent with SYNCHRONIZE.
+	FlagMaxPacketSizeIncluded uint16 = 1 << 7
+
+	// FlagProfileInteractive (bit 8): Unused or ignored.
+	// The interactive profile is unimplemented.
+	FlagProfileInteractive uint16 = 1 << 8
+
+	// FlagECHO (bit 9): Ping/pong packet.
+	// NOTE: This flag is defined per I2P streaming spec but NOT FULLY IMPLEMENTED.
+	// If set, most other options are ignored.
+	FlagECHO uint16 = 1 << 9
+
+	// FlagNoACK (bit 10): Tells the recipient to ignore the ackThrough field.
+	// Currently set in the initial SYN packet, otherwise the ackThrough field is always valid.
+	FlagNoACK uint16 = 1 << 10
+
+	// FlagOfflineSignature (bit 11): Offline signature (LS2) is present.
+	// Contains the offline signature section from LS2.
+	// FROM_INCLUDED must also be set.
+	FlagOfflineSignature uint16 = 1 << 11
 )
 
 // OfflineSig represents an I2P LS2 offline signature block.
@@ -169,19 +200,21 @@ func (p *Packet) marshalRequiredFields(buf []byte) []byte {
 }
 
 // marshalNACKs writes the NACK count and NACK list to the buffer.
+// Per spec: NACKCount (1 byte) | NACKs (nc*4 bytes) | ResendDelay (1 byte)
 // Returns the updated buffer and any error.
 func (p *Packet) marshalNACKs(buf []byte) ([]byte, error) {
 	if len(p.NACKs) > 255 {
 		return nil, fmt.Errorf("too many NACKs: got %d, max 255", len(p.NACKs))
 	}
 	buf = append(buf, byte(len(p.NACKs)))
-	buf = append(buf, p.ResendDelay)
 
 	var tmp [4]byte
 	for _, nack := range p.NACKs {
 		binary.BigEndian.PutUint32(tmp[:], nack)
 		buf = append(buf, tmp[:]...)
 	}
+
+	buf = append(buf, p.ResendDelay)
 	return buf, nil
 }
 
@@ -367,19 +400,23 @@ func (p *Packet) Marshal() ([]byte, error) {
 //
 // Returns an error if the data is too short or malformed.
 // unmarshalRequiredFields parses the fixed required fields from packet data.
-// Returns the offset after parsing (18 bytes consumed).
+// Per spec, these are the first 16 bytes (4 fields of 4 bytes each).
+// Returns the offset after parsing (16 bytes consumed).
 func (p *Packet) unmarshalRequiredFields(data []byte) int {
 	p.SendStreamID = binary.BigEndian.Uint32(data[0:])
 	p.RecvStreamID = binary.BigEndian.Uint32(data[4:])
 	p.SequenceNum = binary.BigEndian.Uint32(data[8:])
 	p.AckThrough = binary.BigEndian.Uint32(data[12:])
-	p.ResendDelay = uint8(data[17])
-	return 18
+	return 16
 }
 
-// unmarshalNACKs parses the NACK list from packet data.
+// unmarshalNACKs parses the NACK count and NACK list from packet data.
+// Per spec: NACKCount (1 byte at offset 16) | NACKs (nc*4 bytes)
 // Returns the new offset and any error.
-func (p *Packet) unmarshalNACKs(data []byte, offset int, nackCount uint8) (int, error) {
+func (p *Packet) unmarshalNACKs(data []byte, offset int) (int, error) {
+	nackCount := data[offset]
+	offset++
+
 	if nackCount == 0 {
 		return offset, nil
 	}
@@ -534,16 +571,20 @@ func (p *Packet) unmarshalDestSignature(data []byte, offset, optionsEnd int, off
 	return offset + destSigLen, nil
 }
 
-// unmarshalHeader parses the packet header including NACKs, flags, and option size.
-// It returns the offset after the header, the option size, and the options end position.
+// unmarshalHeader parses the packet header including NACKs, ResendDelay, flags, and option size.
+// Per spec order: required fields | NACKCount | NACKs | ResendDelay | Flags | OptionSize
+// It returns the offset after the header and the options end position.
 func (p *Packet) unmarshalHeader(data []byte) (offset int, optionsEnd int, err error) {
 	offset = p.unmarshalRequiredFields(data)
-	nackCount := data[16]
 
-	offset, err = p.unmarshalNACKs(data, offset, nackCount)
+	offset, err = p.unmarshalNACKs(data, offset)
 	if err != nil {
 		return 0, 0, err
 	}
+
+	// Read ResendDelay after NACKs (1 byte)
+	p.ResendDelay = data[offset]
+	offset++
 
 	p.Flags = binary.BigEndian.Uint16(data[offset:])
 	offset += 2

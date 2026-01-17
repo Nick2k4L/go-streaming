@@ -25,7 +25,7 @@ func TestCongestionDetectionOnNACK(t *testing.T) {
 		SequenceNum:  100,
 		AckThrough:   5,
 		NACKs:        []uint32{3, 4}, // Lost packets
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -65,7 +65,7 @@ func TestCongestionDetectionMultipleNACKs(t *testing.T) {
 		SequenceNum:  100,
 		AckThrough:   10,
 		NACKs:        []uint32{5, 6, 7, 8, 9}, // 5 lost packets
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -101,7 +101,7 @@ func TestCongestionDetectionMinimumWindow(t *testing.T) {
 		SequenceNum:  100,
 		AckThrough:   5,
 		NACKs:        []uint32{3}, // Single lost packet
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -141,7 +141,7 @@ func TestCongestionDetectionWithSlowStart(t *testing.T) {
 		RecvStreamID: 2,
 		SequenceNum:  100,
 		AckThrough:   5,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -159,7 +159,7 @@ func TestCongestionDetectionWithSlowStart(t *testing.T) {
 		SequenceNum:  101,
 		AckThrough:   8,
 		NACKs:        []uint32{6, 7}, // Packet loss
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -202,7 +202,7 @@ func TestCongestionDetectionRecovery(t *testing.T) {
 		SequenceNum:  100,
 		AckThrough:   10,
 		NACKs:        []uint32{8, 9}, // Packet loss
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -222,7 +222,7 @@ func TestCongestionDetectionRecovery(t *testing.T) {
 		RecvStreamID: 2,
 		SequenceNum:  101,
 		AckThrough:   15,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -254,7 +254,7 @@ func TestCongestionDetectionHighWindow(t *testing.T) {
 		SequenceNum:  100,
 		AckThrough:   50,
 		NACKs:        []uint32{45, 46, 47}, // Packet loss at high window
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -296,7 +296,7 @@ func TestNoCongestionDetectionWithoutNACKs(t *testing.T) {
 		SequenceNum:  100,
 		AckThrough:   5,
 		NACKs:        nil, // No packet loss
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -334,7 +334,7 @@ func TestCongestionDetectionSingleNACK(t *testing.T) {
 		SequenceNum:  100,
 		AckThrough:   25,
 		NACKs:        []uint32{20}, // Single lost packet
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -370,7 +370,7 @@ func TestCongestionDetectionEdgeCaseThree(t *testing.T) {
 		SequenceNum:  100,
 		AckThrough:   5,
 		NACKs:        []uint32{4},
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()

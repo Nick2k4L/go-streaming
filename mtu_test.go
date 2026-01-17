@@ -90,7 +90,7 @@ func TestMTUNegotiation_PacketUnmarshalWithMTU(t *testing.T) {
 				RecvStreamID: 8080,
 				SequenceNum:  1000,
 				AckThrough:   999,
-				Flags:        FlagSYN | FlagACK,
+				Flags:        FlagSYN | 0, // No flags needed - ackThrough always valid per spec
 			}
 
 			if tt.hasFlag {
@@ -207,7 +207,7 @@ func TestMTUNegotiation_ExtractionFromPackets(t *testing.T) {
 				RecvStreamID: 12345,
 				SequenceNum:  5000,
 				AckThrough:   1000,
-				Flags:        FlagSYN | FlagACK,
+				Flags:        FlagSYN | 0, // No flags needed - ackThrough always valid per spec
 			}
 
 			if tt.packetMTU > 0 {
@@ -254,7 +254,7 @@ func TestProcessSynAck_ExtractsMTU(t *testing.T) {
 				RecvStreamID: uint32(conn.localPort), // Our stream ID (as echoed by peer)
 				SequenceNum:  5000,                   // Peer's ISN
 				AckThrough:   conn.sendSeq - 1,
-				Flags:        FlagSYN | FlagACK,
+				Flags:        FlagSYN | 0, // No flags needed - ackThrough always valid per spec
 			}
 
 			if tt.includeFlag && tt.packetMTU > 0 {

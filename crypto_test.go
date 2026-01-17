@@ -84,7 +84,7 @@ func TestSignPacket(t *testing.T) {
 			RecvStreamID:    2,
 			SequenceNum:     100,
 			AckThrough:      99,
-			Flags:           FlagACK | FlagFromIncluded | FlagSignatureIncluded,
+			Flags:           FlagFromIncluded | FlagSignatureIncluded,
 			FromDestination: dest,
 			Payload:         []byte("test payload"),
 		}

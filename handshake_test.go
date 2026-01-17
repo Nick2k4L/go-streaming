@@ -286,13 +286,14 @@ func TestSendSYNPacketFormat(t *testing.T) {
 }
 
 // TestSendSynAckPacketFormat verifies SYN-ACK packet format.
+// Per I2P streaming spec, SYN-ACK is identified by FlagSYN set and SendStreamID > 0.
 func TestSendSynAckPacketFormat(t *testing.T) {
 	pkt := &Packet{
-		SendStreamID: 1234,
+		SendStreamID: 1234, // > 0 indicates this is a SYN-ACK response
 		RecvStreamID: 5678,
 		SequenceNum:  100,
 		AckThrough:   42, // ACKing the SYN
-		Flags:        FlagSYN | FlagACK,
+		Flags:        FlagSYN, // Only SYN flag needed for SYN-ACK per spec
 	}
 
 	data, err := pkt.Marshal()
@@ -304,17 +305,19 @@ func TestSendSynAckPacketFormat(t *testing.T) {
 
 	assert.Equal(t, pkt.SequenceNum, parsed.SequenceNum)
 	assert.Equal(t, pkt.AckThrough, parsed.AckThrough)
-	assert.Equal(t, FlagSYN|FlagACK, parsed.Flags)
+	assert.Equal(t, FlagSYN, parsed.Flags)            // SYN-ACK only has SYN flag
+	assert.True(t, parsed.SendStreamID > 0)           // SYN-ACK has assigned stream ID
 }
 
 // TestSendACKPacketFormat verifies final ACK packet format.
+// Per I2P streaming spec, a plain ACK has sequenceNum=0 and no SYN flag.
 func TestSendACKPacketFormat(t *testing.T) {
 	pkt := &Packet{
 		SendStreamID: 1234,
 		RecvStreamID: 5678,
-		SequenceNum:  43,
+		SequenceNum:  0, // seq=0 without SYN = plain ACK per spec
 		AckThrough:   100, // ACKing the SYN-ACK
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed for plain ACK
 	}
 
 	data, err := pkt.Marshal()
@@ -325,8 +328,9 @@ func TestSendACKPacketFormat(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, pkt.AckThrough, parsed.AckThrough)
-	assert.Equal(t, FlagACK, parsed.Flags&FlagACK)
-	assert.Equal(t, uint16(0), parsed.Flags&FlagSYN) // No SYN flag
+	assert.Equal(t, uint16(0), parsed.Flags)          // No flags for plain ACK
+	assert.Equal(t, uint32(0), parsed.SequenceNum)    // seq=0 for plain ACK
+	assert.Equal(t, uint16(0), parsed.Flags&FlagSYN)  // No SYN flag
 }
 
 // TestProcessSynAck verifies SYN-ACK processing logic.
@@ -348,7 +352,7 @@ func TestProcessSynAck(t *testing.T) {
 		RecvStreamID: 1234,
 		SequenceNum:  100, // Remote ISN
 		AckThrough:   42,  // ACKing our SYN
-		Flags:        FlagSYN | FlagACK,
+		Flags:        FlagSYN | 0, // No flags needed - ackThrough always valid per spec
 	}
 
 	conn.processSynAck(synAckPkt)

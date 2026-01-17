@@ -32,7 +32,7 @@ func TestRTOFirstMeasurement(t *testing.T) {
 		RecvStreamID: 2,
 		SequenceNum:  100,
 		AckThrough:   5,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -84,7 +84,7 @@ func TestRTOSubsequentMeasurements(t *testing.T) {
 		RecvStreamID: 2,
 		SequenceNum:  100,
 		AckThrough:   5,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -109,7 +109,7 @@ func TestRTOSubsequentMeasurements(t *testing.T) {
 		RecvStreamID: 2,
 		SequenceNum:  101,
 		AckThrough:   10,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -151,7 +151,7 @@ func TestRTOMinimumBound(t *testing.T) {
 		RecvStreamID: 2,
 		SequenceNum:  100,
 		AckThrough:   5,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -186,7 +186,7 @@ func TestRTOMaximumBound(t *testing.T) {
 		RecvStreamID: 2,
 		SequenceNum:  100,
 		AckThrough:   5,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -223,7 +223,7 @@ func TestRTOVarianceCalculation(t *testing.T) {
 		RecvStreamID: 2,
 		SequenceNum:  100,
 		AckThrough:   5,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -260,7 +260,7 @@ func TestRTOWithStableNetwork(t *testing.T) {
 			RecvStreamID: 2,
 			SequenceNum:  100 + i,
 			AckThrough:   i * 5,
-			Flags:        FlagACK,
+			Flags:        0, // No flags needed - ackThrough always valid per spec
 		}
 
 		s.mu.Lock()
@@ -308,7 +308,7 @@ func TestRTOFormula(t *testing.T) {
 		RecvStreamID: 2,
 		SequenceNum:  100,
 		AckThrough:   5,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -350,7 +350,7 @@ func TestRTONoPacketInfo(t *testing.T) {
 		RecvStreamID: 2,
 		SequenceNum:  100,
 		AckThrough:   5,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()
@@ -391,7 +391,7 @@ func TestRTOAlphaAndBeta(t *testing.T) {
 		RecvStreamID: 2,
 		SequenceNum:  100,
 		AckThrough:   5,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.mu.Lock()

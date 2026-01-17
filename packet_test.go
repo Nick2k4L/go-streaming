@@ -45,7 +45,7 @@ func TestPacketMarshal(t *testing.T) {
 				RecvStreamID: 20,
 				SequenceNum:  1000,
 				AckThrough:   999,
-				Flags:        FlagACK,
+				Flags:        0, // No flags needed - ackThrough always valid per spec
 				Payload:      []byte("hello"),
 			},
 			wantLen: 27, // 22 + 5 bytes payload
@@ -60,7 +60,7 @@ func TestPacketMarshal(t *testing.T) {
 				RecvStreamID:  2,
 				SequenceNum:   1,
 				AckThrough:    0,
-				Flags:         FlagACK | FlagDelayRequested,
+				Flags:         FlagDelayRequested,
 				OptionalDelay: 1000, // 1 second delay
 			},
 			wantLen: 24, // 22 + 2 bytes optional delay
@@ -76,7 +76,7 @@ func TestPacketMarshal(t *testing.T) {
 				RecvStreamID:  2,
 				SequenceNum:   1,
 				AckThrough:    0,
-				Flags:         FlagACK | FlagDelayRequested,
+				Flags:         FlagDelayRequested,
 				OptionalDelay: 60001, // Indicates choking
 			},
 			wantLen: 24,
@@ -92,11 +92,11 @@ func TestPacketMarshal(t *testing.T) {
 				RecvStreamID: 2,
 				SequenceNum:  1,
 				AckThrough:   0,
-				Flags:        FlagSYN | FlagACK,
+				Flags:        FlagSYN | 0, // No flags needed - ackThrough always valid per spec
 			},
 			wantLen: 22,
 			check: func(t *testing.T, data []byte) {
-				assert.Equal(t, FlagSYN|FlagACK, binary.BigEndian.Uint16(data[18:20]), "Flags")
+				assert.Equal(t, FlagSYN, binary.BigEndian.Uint16(data[18:20]), "Flags")
 			},
 		},
 	}
@@ -168,20 +168,25 @@ func TestGenerateISN(t *testing.T) {
 }
 
 // TestPacketFlags verifies flag constants are correct per I2P spec.
+// Per https://geti2p.net/spec/streaming - bit order 15....0 (15 is MSB)
 func TestPacketFlags(t *testing.T) {
 	tests := []struct {
 		name string
 		flag uint16
 		want uint16
 	}{
-		{"SYN", FlagSYN, 1 << 0},
-		{"ACK", FlagACK, 1 << 1},
-		{"FIN", FlagFIN, 1 << 2},
-		{"RESET", FlagRESET, 1 << 3},
-		{"CLOSE", FlagCLOSE, 1 << 4},
-		{"ECHO", FlagECHO, 1 << 5},
-		{"SignatureIncluded", FlagSignatureIncluded, 1 << 6},
-		{"FromIncluded", FlagFromIncluded, 1 << 7},
+		{"SYN (bit 0)", FlagSYN, 1 << 0},
+		{"CLOSE (bit 1)", FlagCLOSE, 1 << 1},
+		{"RESET (bit 2)", FlagRESET, 1 << 2},
+		{"SignatureIncluded (bit 3)", FlagSignatureIncluded, 1 << 3},
+		{"SignatureRequested (bit 4)", FlagSignatureRequested, 1 << 4},
+		{"FromIncluded (bit 5)", FlagFromIncluded, 1 << 5},
+		{"DelayRequested (bit 6)", FlagDelayRequested, 1 << 6},
+		{"MaxPacketSizeIncluded (bit 7)", FlagMaxPacketSizeIncluded, 1 << 7},
+		{"ProfileInteractive (bit 8)", FlagProfileInteractive, 1 << 8},
+		{"ECHO (bit 9)", FlagECHO, 1 << 9},
+		{"NoACK (bit 10)", FlagNoACK, 1 << 10},
+		{"OfflineSignature (bit 11)", FlagOfflineSignature, 1 << 11},
 	}
 
 	for _, tt := range tests {
@@ -204,7 +209,7 @@ func TestPacketMarshalLargePayload(t *testing.T) {
 		RecvStreamID: 2,
 		SequenceNum:  1,
 		AckThrough:   0,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 		Payload:      payload,
 	}
 
@@ -279,7 +284,7 @@ func TestPacketUnmarshal(t *testing.T) {
 				binary.BigEndian.PutUint32(buf[12:], 999)
 				buf[16] = 0
 				buf[17] = 0
-				binary.BigEndian.PutUint16(buf[18:], FlagACK)
+				binary.BigEndian.PutUint16(buf[18:], 0) // No flags - ackThrough always valid per spec
 				binary.BigEndian.PutUint16(buf[20:], 0) // Option Size
 				buf = append(buf, []byte("hello")...)
 				return buf
@@ -289,7 +294,7 @@ func TestPacketUnmarshal(t *testing.T) {
 				RecvStreamID: 20,
 				SequenceNum:  1000,
 				AckThrough:   999,
-				Flags:        FlagACK,
+				Flags:        0, // No flags needed - ackThrough always valid per spec
 				Payload:      []byte("hello"),
 			},
 		},
@@ -303,7 +308,7 @@ func TestPacketUnmarshal(t *testing.T) {
 				binary.BigEndian.PutUint32(buf[12:], 0)
 				buf[16] = 0
 				buf[17] = 0
-				binary.BigEndian.PutUint16(buf[18:], FlagACK|FlagDelayRequested)
+				binary.BigEndian.PutUint16(buf[18:], FlagDelayRequested)
 				binary.BigEndian.PutUint16(buf[20:], 2)    // Option Size
 				binary.BigEndian.PutUint16(buf[22:], 1000) // OptionalDelay
 				return buf
@@ -313,7 +318,7 @@ func TestPacketUnmarshal(t *testing.T) {
 				RecvStreamID:  2,
 				SequenceNum:   1,
 				AckThrough:    0,
-				Flags:         FlagACK | FlagDelayRequested,
+				Flags:         FlagDelayRequested,
 				OptionalDelay: 1000,
 			},
 		},
@@ -327,7 +332,7 @@ func TestPacketUnmarshal(t *testing.T) {
 				binary.BigEndian.PutUint32(buf[12:], 0)
 				buf[16] = 0
 				buf[17] = 0
-				binary.BigEndian.PutUint16(buf[18:], FlagACK|FlagDelayRequested)
+				binary.BigEndian.PutUint16(buf[18:], FlagDelayRequested)
 				binary.BigEndian.PutUint16(buf[20:], 2)     // Option Size
 				binary.BigEndian.PutUint16(buf[22:], 60001) // Choking indicator
 				return buf
@@ -337,7 +342,7 @@ func TestPacketUnmarshal(t *testing.T) {
 				RecvStreamID:  2,
 				SequenceNum:   1,
 				AckThrough:    0,
-				Flags:         FlagACK | FlagDelayRequested,
+				Flags:         FlagDelayRequested,
 				OptionalDelay: 60001,
 			},
 		},
@@ -351,7 +356,7 @@ func TestPacketUnmarshal(t *testing.T) {
 				binary.BigEndian.PutUint32(buf[12:], 0)
 				buf[16] = 0
 				buf[17] = 0
-				binary.BigEndian.PutUint16(buf[18:], FlagSYN|FlagACK)
+				binary.BigEndian.PutUint16(buf[18:], FlagSYN)
 				binary.BigEndian.PutUint16(buf[20:], 0) // Option Size
 				return buf
 			}(),
@@ -360,7 +365,7 @@ func TestPacketUnmarshal(t *testing.T) {
 				RecvStreamID: 2,
 				SequenceNum:  1,
 				AckThrough:   0,
-				Flags:        FlagSYN | FlagACK,
+				Flags:        FlagSYN | 0, // No flags needed - ackThrough always valid per spec
 			},
 		},
 		{
@@ -378,7 +383,7 @@ func TestPacketUnmarshal(t *testing.T) {
 				binary.BigEndian.PutUint32(buf[12:], 0)
 				buf[16] = 5 // Non-zero NACK count
 				buf[17] = 0
-				binary.BigEndian.PutUint16(buf[18:], FlagACK)
+				binary.BigEndian.PutUint16(buf[18:], 0) // No flags - ackThrough always valid per spec
 				binary.BigEndian.PutUint16(buf[20:], 0) // Option Size
 				return buf
 			}(),
@@ -394,7 +399,7 @@ func TestPacketUnmarshal(t *testing.T) {
 				binary.BigEndian.PutUint32(buf[12:], 0)
 				buf[16] = 0
 				buf[17] = 0
-				binary.BigEndian.PutUint16(buf[18:], FlagACK)
+				binary.BigEndian.PutUint16(buf[18:], 0) // No flags - ackThrough always valid per spec
 				binary.BigEndian.PutUint16(buf[20:], 0) // Option Size
 
 				payload := make([]byte, DefaultMTU)
@@ -409,7 +414,7 @@ func TestPacketUnmarshal(t *testing.T) {
 				RecvStreamID: 2,
 				SequenceNum:  1,
 				AckThrough:   0,
-				Flags:        FlagACK,
+				Flags:        0, // No flags needed - ackThrough always valid per spec
 				Payload: func() []byte {
 					p := make([]byte, DefaultMTU)
 					for i := range p {
@@ -501,7 +506,7 @@ func TestPacketRoundTrip(t *testing.T) {
 				RecvStreamID: 20,
 				SequenceNum:  1000,
 				AckThrough:   999,
-				Flags:        FlagACK,
+				Flags:        0, // No flags needed - ackThrough always valid per spec
 				Payload:      []byte("test data"),
 			},
 		},
@@ -512,7 +517,7 @@ func TestPacketRoundTrip(t *testing.T) {
 				RecvStreamID:  2,
 				SequenceNum:   1,
 				AckThrough:    0,
-				Flags:         FlagACK | FlagDelayRequested,
+				Flags:         FlagDelayRequested,
 				OptionalDelay: 500,
 			},
 		},
@@ -523,7 +528,7 @@ func TestPacketRoundTrip(t *testing.T) {
 				RecvStreamID:  2,
 				SequenceNum:   1,
 				AckThrough:    0,
-				Flags:         FlagACK | FlagDelayRequested,
+				Flags:         FlagDelayRequested,
 				OptionalDelay: 60001,
 			},
 		},
@@ -534,7 +539,7 @@ func TestPacketRoundTrip(t *testing.T) {
 				RecvStreamID: 0x9ABCDEF0,
 				SequenceNum:  0xFEDCBA98,
 				AckThrough:   0x76543210,
-				Flags:        FlagSYN | FlagACK, // Removed FlagFromIncluded as we don't have a FromDestination
+				Flags:        FlagSYN, // Removed FlagFromIncluded as we don't have a FromDestination
 				ResendDelay:  150,               // Changed from 1500 to fit uint8 (max 255)
 				Payload:      []byte("round trip test"),
 			},
@@ -546,7 +551,7 @@ func TestPacketRoundTrip(t *testing.T) {
 				RecvStreamID: 2,
 				SequenceNum:  1,
 				AckThrough:   0,
-				Flags:        FlagACK,
+				Flags:        0, // No flags needed - ackThrough always valid per spec
 				Payload:      make([]byte, DefaultMTU),
 			},
 		},
@@ -611,7 +616,7 @@ func TestPacketUnmarshalEdgeCases(t *testing.T) {
 			name: "23 bytes (22 + 1 byte payload)",
 			data: func() []byte {
 				buf := make([]byte, 23)
-				binary.BigEndian.PutUint16(buf[18:], FlagACK)
+				binary.BigEndian.PutUint16(buf[18:], 0) // No flags - ackThrough always valid per spec
 				binary.BigEndian.PutUint16(buf[20:], 0) // Option Size
 				buf[22] = 0x42                          // 1 byte payload
 				return buf
@@ -652,14 +657,14 @@ func TestPacketMarshalWithNACKs(t *testing.T) {
 				RecvStreamID: 2,
 				SequenceNum:  100,
 				AckThrough:   99,
-				Flags:        FlagACK,
+				Flags:        0, // No flags needed - ackThrough always valid per spec
 				NACKs:        []uint32{50},
 			},
 			wantLen: 26, // 22 base + 4 bytes (1 NACK)
 			check: func(t *testing.T, data []byte) {
 				assert.Equal(t, uint8(1), data[16], "NACKCount should be 1")
 				assert.Equal(t, uint32(50), binary.BigEndian.Uint32(data[18:22]), "NACK value")
-				assert.Equal(t, FlagACK, binary.BigEndian.Uint16(data[22:24]), "Flags")
+				assert.Equal(t, uint16(0), binary.BigEndian.Uint16(data[22:24]), "Flags")
 			},
 		},
 		{
@@ -669,7 +674,7 @@ func TestPacketMarshalWithNACKs(t *testing.T) {
 				RecvStreamID: 2,
 				SequenceNum:  100,
 				AckThrough:   99,
-				Flags:        FlagACK,
+				Flags:        0, // No flags needed - ackThrough always valid per spec
 				NACKs:        []uint32{10, 20, 30},
 			},
 			wantLen: 34, // 22 base + 12 bytes (3 NACKs)
@@ -678,7 +683,7 @@ func TestPacketMarshalWithNACKs(t *testing.T) {
 				assert.Equal(t, uint32(10), binary.BigEndian.Uint32(data[18:22]), "NACK 0")
 				assert.Equal(t, uint32(20), binary.BigEndian.Uint32(data[22:26]), "NACK 1")
 				assert.Equal(t, uint32(30), binary.BigEndian.Uint32(data[26:30]), "NACK 2")
-				assert.Equal(t, FlagACK, binary.BigEndian.Uint16(data[30:32]), "Flags")
+				assert.Equal(t, uint16(0), binary.BigEndian.Uint16(data[30:32]), "Flags")
 			},
 		},
 		{
@@ -707,7 +712,7 @@ func TestPacketMarshalWithNACKs(t *testing.T) {
 				RecvStreamID: 2,
 				SequenceNum:  100,
 				AckThrough:   99,
-				Flags:        FlagACK,
+				Flags:        0, // No flags needed - ackThrough always valid per spec
 				NACKs:        []uint32{50, 55},
 				Payload:      []byte("test data"),
 			},
@@ -724,7 +729,7 @@ func TestPacketMarshalWithNACKs(t *testing.T) {
 				RecvStreamID:  2,
 				SequenceNum:   100,
 				AckThrough:    99,
-				Flags:         FlagACK | FlagDelayRequested | FlagMaxPacketSizeIncluded,
+				Flags:         FlagDelayRequested | FlagMaxPacketSizeIncluded,
 				NACKs:         []uint32{50},
 				OptionalDelay: 1000,
 				MaxPacketSize: 1500,
@@ -744,7 +749,7 @@ func TestPacketMarshalWithNACKs(t *testing.T) {
 				RecvStreamID: 2,
 				SequenceNum:  100,
 				AckThrough:   99,
-				Flags:        FlagACK,
+				Flags:        0, // No flags needed - ackThrough always valid per spec
 				NACKs:        []uint32{},
 			},
 			wantLen: 22, // Same as packet without NACKs field
@@ -786,7 +791,7 @@ func TestPacketUnmarshalWithNACKs(t *testing.T) {
 				buf[16] = 1                                   // NACKCount
 				buf[17] = 0                                   // ResendDelay
 				binary.BigEndian.PutUint32(buf[18:], 50)      // NACK value
-				binary.BigEndian.PutUint16(buf[22:], FlagACK) // Flags
+				binary.BigEndian.PutUint16(buf[22:], 0) // Flags
 				binary.BigEndian.PutUint16(buf[24:], 0)       // Option Size
 				return buf
 			}(),
@@ -810,7 +815,7 @@ func TestPacketUnmarshalWithNACKs(t *testing.T) {
 				binary.BigEndian.PutUint32(buf[18:], 10)      // NACK 0
 				binary.BigEndian.PutUint32(buf[22:], 20)      // NACK 1
 				binary.BigEndian.PutUint32(buf[26:], 30)      // NACK 2
-				binary.BigEndian.PutUint16(buf[30:], FlagACK) // Flags
+				binary.BigEndian.PutUint16(buf[30:], 0) // Flags
 				binary.BigEndian.PutUint16(buf[32:], 0)       // Option Size
 				return buf
 			}(),
@@ -859,7 +864,7 @@ func TestPacketUnmarshalWithNACKs(t *testing.T) {
 				buf[17] = 0                                   // ResendDelay
 				binary.BigEndian.PutUint32(buf[18:], 50)      // NACK 0
 				binary.BigEndian.PutUint32(buf[22:], 55)      // NACK 1
-				binary.BigEndian.PutUint16(buf[26:], FlagACK) // Flags
+				binary.BigEndian.PutUint16(buf[26:], 0) // Flags
 				binary.BigEndian.PutUint16(buf[28:], 0)       // Option Size
 				copy(buf[30:], []byte("hello"))               // Payload
 				return buf
@@ -881,7 +886,7 @@ func TestPacketUnmarshalWithNACKs(t *testing.T) {
 				binary.BigEndian.PutUint32(buf[12:], 99)      // AckThrough
 				buf[16] = 2                                   // NACKCount = 2 but no data
 				buf[17] = 0                                   // ResendDelay
-				binary.BigEndian.PutUint16(buf[18:], FlagACK) // Flags (wrong offset but will error before)
+				binary.BigEndian.PutUint16(buf[18:], 0) // No flags - ackThrough always valid per spec // Flags (wrong offset but will error before)
 				binary.BigEndian.PutUint16(buf[20:], 0)       // Option Size
 				return buf
 			}(),
@@ -898,7 +903,7 @@ func TestPacketUnmarshalWithNACKs(t *testing.T) {
 				binary.BigEndian.PutUint32(buf[12:], 99)      // AckThrough
 				buf[16] = 0                                   // NACKCount
 				buf[17] = 0                                   // ResendDelay
-				binary.BigEndian.PutUint16(buf[18:], FlagACK) // Flags
+				binary.BigEndian.PutUint16(buf[18:], 0) // No flags - ackThrough always valid per spec // Flags
 				binary.BigEndian.PutUint16(buf[20:], 0)       // Option Size
 				return buf
 			}(),
@@ -942,7 +947,7 @@ func TestPacketNACKsRoundTrip(t *testing.T) {
 				RecvStreamID: 2,
 				SequenceNum:  100,
 				AckThrough:   99,
-				Flags:        FlagACK,
+				Flags:        0, // No flags needed - ackThrough always valid per spec
 				NACKs:        []uint32{50},
 			},
 		},
@@ -953,7 +958,7 @@ func TestPacketNACKsRoundTrip(t *testing.T) {
 				RecvStreamID: 2,
 				SequenceNum:  100,
 				AckThrough:   99,
-				Flags:        FlagACK,
+				Flags:        0, // No flags needed - ackThrough always valid per spec
 				NACKs:        []uint32{10, 20, 30, 40, 50},
 			},
 		},
@@ -975,7 +980,7 @@ func TestPacketNACKsRoundTrip(t *testing.T) {
 				RecvStreamID:  2,
 				SequenceNum:   100,
 				AckThrough:    99,
-				Flags:         FlagACK | FlagMaxPacketSizeIncluded,
+				Flags:         FlagMaxPacketSizeIncluded,
 				NACKs:         []uint32{50, 55, 60},
 				MaxPacketSize: 1500,
 				Payload:       []byte("test data"),
@@ -1020,7 +1025,7 @@ func TestPacketMarshalTooManyNACKs(t *testing.T) {
 		RecvStreamID: 2,
 		SequenceNum:  100,
 		AckThrough:   99,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 		NACKs:        nacks,
 	}
 
@@ -1066,7 +1071,7 @@ func TestPacketWithFromDestination(t *testing.T) {
 			RecvStreamID:    20,
 			SequenceNum:     500,
 			AckThrough:      499,
-			Flags:           FlagACK | FlagFromIncluded,
+			Flags:           FlagFromIncluded,
 			FromDestination: dest,
 			Payload:         []byte("test"),
 		}
@@ -1183,7 +1188,7 @@ func TestPacketWithSignature(t *testing.T) {
 			RecvStreamID:    20,
 			SequenceNum:     500,
 			AckThrough:      499,
-			Flags:           FlagACK | FlagFromIncluded | FlagSignatureIncluded,
+			Flags:           FlagFromIncluded | FlagSignatureIncluded,
 			FromDestination: dest,
 			Signature:       testSignature,
 			Payload:         []byte("signed"),
@@ -1289,7 +1294,7 @@ func TestPacketRoundTripWithAuthFields(t *testing.T) {
 				RecvStreamID:    12345,
 				SequenceNum:     2000,
 				AckThrough:      1999,
-				Flags:           FlagACK | FlagFromIncluded | FlagSignatureIncluded,
+				Flags:           FlagFromIncluded | FlagSignatureIncluded,
 				FromDestination: dest,
 				Signature:       testSignature,
 				Payload:         []byte("authenticated data"),
@@ -1302,7 +1307,7 @@ func TestPacketRoundTripWithAuthFields(t *testing.T) {
 				RecvStreamID:    12345,
 				SequenceNum:     3000,
 				AckThrough:      2999,
-				Flags:           FlagACK | FlagDelayRequested | FlagMaxPacketSizeIncluded | FlagFromIncluded | FlagSignatureIncluded,
+				Flags:           FlagDelayRequested | FlagMaxPacketSizeIncluded | FlagFromIncluded | FlagSignatureIncluded,
 				OptionalDelay:   500,
 				MaxPacketSize:   1024,
 				FromDestination: dest,

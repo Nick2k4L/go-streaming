@@ -37,31 +37,31 @@ func TestChokeReceptionDetection(t *testing.T) {
 		{
 			name:          "no delay requested - not choked",
 			optionalDelay: 0,
-			flags:         FlagACK,
+			flags:         0, // No flags needed - ackThrough always valid per spec
 			expectChoked:  false,
 		},
 		{
 			name:          "delay requested but under threshold - not choked",
 			optionalDelay: 30000,
-			flags:         FlagACK | FlagDelayRequested,
+			flags:         FlagDelayRequested,
 			expectChoked:  false,
 		},
 		{
 			name:          "delay at threshold - not choked",
 			optionalDelay: 60000,
-			flags:         FlagACK | FlagDelayRequested,
+			flags:         FlagDelayRequested,
 			expectChoked:  false,
 		},
 		{
 			name:          "delay over threshold - choked",
 			optionalDelay: 61000,
-			flags:         FlagACK | FlagDelayRequested,
+			flags:         FlagDelayRequested,
 			expectChoked:  true,
 		},
 		{
 			name:          "high delay - choked",
 			optionalDelay: 65535,
-			flags:         FlagACK | FlagDelayRequested,
+			flags:         FlagDelayRequested,
 			expectChoked:  true,
 		},
 	}
@@ -101,7 +101,7 @@ func TestUnchokeReceptionClearsState(t *testing.T) {
 
 	// First, receive a choke signal
 	chokePkt := &Packet{
-		Flags:         FlagACK | FlagDelayRequested,
+		Flags:         FlagDelayRequested,
 		OptionalDelay: 61000,
 		AckThrough:    0,
 	}
@@ -119,7 +119,7 @@ func TestUnchokeReceptionClearsState(t *testing.T) {
 
 	// Now receive an unchoke signal
 	unchokePkt := &Packet{
-		Flags:         FlagACK | FlagDelayRequested,
+		Flags:         FlagDelayRequested,
 		OptionalDelay: 0,
 		AckThrough:    0,
 	}
@@ -202,7 +202,7 @@ func TestChokeWithNACKsProcessesBoth(t *testing.T) {
 
 	// Packet with both choke signal and NACKs
 	pkt := &Packet{
-		Flags:         FlagACK | FlagDelayRequested,
+		Flags:         FlagDelayRequested,
 		OptionalDelay: 61000, // Choked
 		AckThrough:    5,
 		NACKs:         []uint32{10}, // Request retransmission
@@ -225,7 +225,7 @@ func TestMultipleChokeSignals(t *testing.T) {
 
 	// Send first choke signal
 	pkt1 := &Packet{
-		Flags:         FlagACK | FlagDelayRequested,
+		Flags:         FlagDelayRequested,
 		OptionalDelay: 61000,
 		AckThrough:    0,
 	}
@@ -246,7 +246,7 @@ func TestMultipleChokeSignals(t *testing.T) {
 
 	// Send second choke signal
 	pkt2 := &Packet{
-		Flags:         FlagACK | FlagDelayRequested,
+		Flags:         FlagDelayRequested,
 		OptionalDelay: 62000,
 		AckThrough:    0,
 	}
@@ -267,7 +267,7 @@ func TestChokeWithoutFlagNotProcessed(t *testing.T) {
 
 	// Packet with high OptionalDelay but without FlagDelayRequested
 	pkt := &Packet{
-		Flags:         FlagACK, // No FlagDelayRequested
+		Flags:         0, // No FlagDelayRequested - per spec no flags needed for ACK
 		OptionalDelay: 65000,   // Would indicate choke if flag was set
 		AckThrough:    0,
 	}
@@ -287,7 +287,7 @@ func TestChokeStatePreservedAcrossACKs(t *testing.T) {
 
 	// Receive choke signal
 	chokePkt := &Packet{
-		Flags:         FlagACK | FlagDelayRequested,
+		Flags:         FlagDelayRequested,
 		OptionalDelay: 61000,
 		AckThrough:    0,
 	}
@@ -299,7 +299,7 @@ func TestChokeStatePreservedAcrossACKs(t *testing.T) {
 
 	// Receive regular ACK without delay requested
 	ackPkt := &Packet{
-		Flags:      FlagACK,
+		Flags:      0, // No flags needed - ackThrough always valid per spec
 		AckThrough: 1,
 	}
 
@@ -344,7 +344,7 @@ func TestChokedUntilExactTiming(t *testing.T) {
 	beforeChoke := time.Now()
 
 	pkt := &Packet{
-		Flags:         FlagACK | FlagDelayRequested,
+		Flags:         FlagDelayRequested,
 		OptionalDelay: 61000,
 		AckThrough:    0,
 	}

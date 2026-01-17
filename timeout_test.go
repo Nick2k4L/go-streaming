@@ -646,7 +646,7 @@ func TestLastActivityUpdatedOnReceive(t *testing.T) {
 	pkt := &Packet{
 		SequenceNum: 100,
 		AckThrough:  50,
-		Flags:       FlagACK,
+		Flags:       0, // No flags needed - ackThrough always valid per spec
 	}
 
 	s.processPacket(pkt)

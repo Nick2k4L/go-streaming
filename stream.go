@@ -625,8 +625,11 @@ func (s *StreamConn) waitForSynAck(ctx context.Context) (*Packet, error) {
 }
 
 // isSynAckPacket checks if the packet is a SYN-ACK response.
+// Per I2P streaming spec, a SYN-ACK has the SYN flag set AND SendStreamID > 0
+// (indicating the responder has assigned their stream ID, unlike initial SYN
+// which has SendStreamID = 0).
 func (s *StreamConn) isSynAckPacket(pkt *Packet) bool {
-	if pkt.Flags&FlagSYN != 0 && pkt.Flags&FlagACK != 0 {
+	if pkt.Flags&FlagSYN != 0 && pkt.SendStreamID > 0 {
 		log.Debug().
 			Uint32("seq", pkt.SequenceNum).
 			Uint32("ack", pkt.AckThrough).
@@ -686,12 +689,15 @@ func (s *StreamConn) sendACK() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Per I2P streaming spec, there is no explicit ACK flag.
+	// The ackThrough field is always valid (unless NO_ACK is set on initial SYN).
+	// A plain ACK packet has sequenceNum=0 and no SYN flag.
 	pkt := &Packet{
 		SendStreamID: s.localStreamID,  // Our stream ID
 		RecvStreamID: s.remoteStreamID, // Peer's stream ID
-		SequenceNum:  s.sendSeq,
-		AckThrough:   s.recvSeq - 1, // ACK the SYN-ACK
-		Flags:        FlagACK,
+		SequenceNum:  0,                // seq=0 without SYN = plain ACK per spec
+		AckThrough:   s.recvSeq - 1,    // ACK the SYN-ACK
+		Flags:        0,                // No flags needed for plain ACK
 	}
 
 	data, err := pkt.Marshal()
@@ -1110,13 +1116,15 @@ func (s *StreamConn) sendSynAck() error {
 }
 
 // buildSynAckPacket creates a SYN-ACK packet with appropriate flags and options.
+// Per I2P streaming spec, a SYN-ACK is identified by FlagSYN set and SendStreamID > 0.
+// There is no explicit ACK flag - ackThrough is always valid.
 func (s *StreamConn) buildSynAckPacket() *Packet {
 	return &Packet{
 		SendStreamID:    s.localStreamID,
 		RecvStreamID:    s.remoteStreamID,
 		SequenceNum:     s.sendSeq,
 		AckThrough:      s.recvSeq - 1,
-		Flags:           FlagSYN | FlagACK | FlagMaxPacketSizeIncluded | FlagSignatureIncluded | FlagFromIncluded,
+		Flags:           FlagSYN | FlagMaxPacketSizeIncluded | FlagSignatureIncluded | FlagFromIncluded,
 		MaxPacketSize:   s.localMTU,
 		FromDestination: s.session.Destination(),
 	}
@@ -1347,13 +1355,14 @@ func (s *StreamConn) setupWindowWaitTimer() (*time.Timer, chan struct{}) {
 
 // sendDataChunk sends a single chunk of data as a packet.
 // Updates sequence numbers and byte counters. Must be called with s.mu held.
+// Per I2P streaming spec, there is no explicit ACK flag - ackThrough is always valid.
 func (s *StreamConn) sendDataChunk(chunk []byte) error {
 	pkt := &Packet{
 		SendStreamID: s.localStreamID,
 		RecvStreamID: s.remoteStreamID,
 		SequenceNum:  s.sendSeq,
 		AckThrough:   s.recvSeq - 1,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed for data packet
 		Payload:      chunk,
 	}
 
@@ -1852,12 +1861,18 @@ func (s *StreamConn) logProcessingPacket(pkt *Packet) {
 }
 
 // dispatchPacketByFlags routes the packet to the appropriate handler based on flags.
+// Per I2P streaming spec:
+// - There is no explicit ACK flag; ackThrough is always valid unless NO_ACK is set
+// - SYN-ACK is identified by SYN flag + SendStreamID > 0
+// - Plain ACK is identified by sequenceNum=0 and no SYN flag
 // Note: Order matters! More specific cases first.
 func (s *StreamConn) dispatchPacketByFlags(pkt *Packet) error {
 	switch {
-	case pkt.Flags&FlagSYN != 0 && pkt.Flags&FlagACK != 0:
+	case pkt.Flags&FlagSYN != 0 && pkt.SendStreamID > 0:
+		// SYN-ACK: SYN flag set and has a stream ID (response, not initial SYN)
 		return s.handleSynAckLocked(pkt)
-	case pkt.Flags&FlagACK != 0 && s.state == StateSynRcvd:
+	case s.state == StateSynRcvd && pkt.Flags&FlagSYN == 0 && pkt.Flags&FlagCLOSE == 0 && pkt.Flags&FlagRESET == 0:
+		// Final ACK of three-way handshake: not SYN/CLOSE/RESET while in SynRcvd state
 		return s.handleFinalAckLocked(pkt)
 	case pkt.Flags&FlagCLOSE != 0:
 		return s.handleCloseLocked(pkt)
@@ -1865,7 +1880,8 @@ func (s *StreamConn) dispatchPacketByFlags(pkt *Packet) error {
 		return s.handleResetLocked(pkt)
 	case len(pkt.Payload) > 0:
 		return s.handleDataLocked(pkt)
-	case pkt.Flags&FlagACK != 0:
+	case pkt.SequenceNum == 0 && pkt.Flags&FlagSYN == 0:
+		// Per spec: sequenceNum=0 without SYN = plain ACK packet
 		return s.handleAckLocked(pkt)
 	default:
 		log.Debug().Uint16("flags", pkt.Flags).Msg("packet with no recognized flags")
@@ -2236,7 +2252,8 @@ func (s *StreamConn) processInSequencePacketLocked(pkt *Packet, seq uint32) erro
 	s.removeFromNACKListLocked(seq)
 	s.deliverBufferedPacketsLocked()
 
-	if pkt.Flags&FlagACK != 0 && seqGreaterThan(pkt.AckThrough, s.ackThrough) {
+	// Per I2P streaming spec, ackThrough is always valid unless NO_ACK flag is set
+	if pkt.Flags&FlagNoACK == 0 && seqGreaterThan(pkt.AckThrough, s.ackThrough) {
 		s.ackThrough = pkt.AckThrough
 	}
 
@@ -2577,15 +2594,17 @@ func (s *StreamConn) handleIncomingPacket(pkt *Packet) error {
 }
 
 // sendAckLocked sends an ACK packet with optional NACKs for selective retransmission.
+// Per I2P streaming spec: sequenceNum=0 without SYN flag = plain ACK packet.
+// There is no explicit ACK flag; ackThrough is always valid.
 // Must be called with s.mu held.
 func (s *StreamConn) sendAckLocked() error {
 	pkt := &Packet{
 		SendStreamID:  s.localStreamID,  // Our stream ID
 		RecvStreamID:  s.remoteStreamID, // Peer's stream ID
-		SequenceNum:   s.sendSeq,
+		SequenceNum:   0,                // seq=0 without SYN = plain ACK per spec
 		AckThrough:    s.recvSeq - 1,
-		Flags:         FlagACK,
-		OptionalDelay: 0, // Request immediate ACK (MVP: no delay optimization)
+		Flags:         0,                // No flags needed for plain ACK
+		OptionalDelay: 0,                // Request immediate ACK (MVP: no delay optimization)
 	}
 
 	// Include NACKs if we have any gaps in received sequences
@@ -2609,10 +2628,10 @@ func (s *StreamConn) sendChokeSignalLocked() error {
 	pkt := &Packet{
 		SendStreamID:  s.localStreamID,
 		RecvStreamID:  s.remoteStreamID,
-		SequenceNum:   s.sendSeq,
+		SequenceNum:   0,                          // seq=0 without SYN = plain ACK per spec
 		AckThrough:    s.recvSeq - 1,
-		Flags:         FlagACK | FlagDelayRequested,
-		OptionalDelay: 61000, // >60000 = choked per I2P streaming spec
+		Flags:         FlagDelayRequested,         // Only delay flag needed for choke
+		OptionalDelay: 61000,                      // >60000 = choked per I2P streaming spec
 	}
 
 	// Include NACKs if we have any gaps (even when choked, request missing packets)
@@ -2636,10 +2655,10 @@ func (s *StreamConn) sendUnchokeSignalLocked() error {
 	pkt := &Packet{
 		SendStreamID:  s.localStreamID,
 		RecvStreamID:  s.remoteStreamID,
-		SequenceNum:   s.sendSeq,
+		SequenceNum:   0,                  // seq=0 without SYN = plain ACK per spec
 		AckThrough:    s.recvSeq - 1,
-		Flags:         FlagACK | FlagDelayRequested,
-		OptionalDelay: 0, // 0-60000 = not choked
+		Flags:         FlagDelayRequested, // Only delay flag needed for unchoke
+		OptionalDelay: 0,                  // 0-60000 = not choked
 	}
 
 	// Include NACKs if we have any gaps

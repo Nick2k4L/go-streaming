@@ -175,7 +175,7 @@ func TestHandleIncomingPacket_ValidSequence(t *testing.T) {
 		RecvStreamID: uint32(conn.localPort),
 		SequenceNum:  expectedSeq,
 		AckThrough:   0,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 		Payload:      []byte("test data"),
 	}
 
@@ -212,7 +212,7 @@ func TestHandleIncomingPacket_InvalidSequence(t *testing.T) {
 		RecvStreamID: uint32(conn.localPort),
 		SequenceNum:  expectedSeq + 5, // Future packet
 		AckThrough:   0,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 		Payload:      []byte("test data"),
 	}
 
@@ -249,7 +249,7 @@ func TestHandleIncomingPacket_UpdatesAckThrough(t *testing.T) {
 		RecvStreamID: uint32(conn.localPort),
 		SequenceNum:  expectedSeq,
 		AckThrough:   42, // Remote acknowledges our seq 42
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 		Payload:      nil,
 	}
 
@@ -273,7 +273,7 @@ func TestSendPacketLocked_ValidPacket(t *testing.T) {
 		RecvStreamID: uint32(conn.remotePort),
 		SequenceNum:  100,
 		AckThrough:   50,
-		Flags:        FlagACK,
+		Flags:        0, // No flags needed - ackThrough always valid per spec
 		Payload:      []byte("test"),
 	}
 
