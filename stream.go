@@ -1365,6 +1365,8 @@ func (s *StreamConn) setupWindowWaitTimer() (*time.Timer, chan struct{}) {
 // sendDataChunk sends a single chunk of data as a packet.
 // Updates sequence numbers and byte counters. Must be called with s.mu held.
 // Per I2P streaming spec, there is no explicit ACK flag - ackThrough is always valid.
+// The ResendDelay field is set to the current RTO in seconds, indicating how long
+// we will wait before retransmitting if no ACK is received.
 func (s *StreamConn) sendDataChunk(chunk []byte) error {
 	pkt := &Packet{
 		SendStreamID: s.localStreamID,
@@ -1372,6 +1374,7 @@ func (s *StreamConn) sendDataChunk(chunk []byte) error {
 		SequenceNum:  s.sendSeq,
 		AckThrough:   s.recvSeq - 1,
 		Flags:        0, // No flags needed for data packet
+		ResendDelay:  s.getResendDelaySeconds(),
 		Payload:      chunk,
 	}
 
@@ -2099,6 +2102,24 @@ func (s *StreamConn) calculateRTO() {
 	log.Debug().
 		Dur("rto", s.rto).
 		Msg("calculated RTO")
+}
+
+// getResendDelaySeconds returns the current RTO as a uint8 value in seconds.
+// Per I2P streaming spec, the resendDelay field indicates how long the sender
+// will wait before retransmitting a packet that hasn't been ACKed.
+// The value is clamped to 0-255 seconds (uint8 range).
+// Must be called with s.mu held.
+func (s *StreamConn) getResendDelaySeconds() uint8 {
+	rtoSeconds := int64(s.rto / time.Second)
+	if rtoSeconds <= 0 {
+		// RTO is less than 1 second - round up to 1
+		return 1
+	}
+	if rtoSeconds > 255 {
+		// Clamp to max uint8 value
+		return 255
+	}
+	return uint8(rtoSeconds)
 }
 
 // measureRTTFromAck measures RTT from an ACKed packet if available.
