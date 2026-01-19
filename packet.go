@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"github.com/go-i2p/common/certificate"
 	go_i2cp "github.com/go-i2p/go-i2cp"
 )
 
@@ -732,6 +733,14 @@ const (
 	SignatureTypeEd25519ph = 8
 )
 
+// I2P Destination Structure Constants
+const (
+	// DestinationPublicKeySize is the size of the ElGamal encryption key (256 bytes)
+	DestinationPublicKeySize = 256
+	// DestinationSigningKeyPadding is the legacy DSA signing key size used for padding (128 bytes)
+	DestinationSigningKeyPadding = 128
+)
+
 // getSignatureLength returns the signature length in bytes for a given destination's key type.
 //
 // I2P streaming protocol supports multiple signature algorithms:
@@ -826,27 +835,19 @@ func getPublicKeyLength(sigType uint16) int {
 
 // getSignatureTypeFromDestination extracts the signature type from a destination's certificate.
 //
-// I2P destination format (binary encoding):
-//   - Public encryption key (256 bytes for ElGamal, variable for newer types)
-//   - Public signing key (variable length based on signature type)
-//   - Certificate (variable length, contains signature type)
+// This function uses github.com/go-i2p/common/certificate to properly parse the
+// destination's certificate and extract the signing key type.
 //
-// Certificate format for KeyCertificate (most common):
-//   - Type: 5 (CERTIFICATE_TYPE_KEY)
-//   - Length: variable
-//   - Payload:
-//   - Signing public key type (2 bytes)
-//   - Crypto public key type (2 bytes)
-//   - Signing public key (variable)
-//   - Crypto public key (variable - usually 0 bytes as ElGamal is in dest already)
+// I2P destination format (binary encoding via WriteToMessage):
+//   - Public encryption key (256 bytes for ElGamal)
+//   - Public signing key (128 bytes, padded for legacy DSA compatibility)
+//   - Certificate (variable length, contains actual key types)
 //
-// For simplicity, this implementation uses a heuristic based on the destination size:
-//   - Standard Ed25519 destination: ~387 bytes (256 ElGamal + 32 Ed25519 + cert)
-//   - Legacy DSA destination: ~387 bytes (256 ElGamal + 128 DSA + minimal cert)
-//   - Larger destinations indicate different signature types
+// For NULL certificates (type 0), the destination uses legacy DSA_SHA1 signing.
+// For KEY certificates (type 5), the signing key type is extracted from the payload.
 //
-// Returns SignatureTypeEd25519 as default since:
-//  1. go-i2cp only creates Ed25519 destinations
+// Returns SignatureTypeEd25519 as fallback since:
+//  1. go-i2cp only creates Ed25519 destinations in practice
 //  2. It's the most common type in modern I2P network
 //  3. Java I2P defaults to Ed25519 since version 0.9.15
 func getSignatureTypeFromDestination(dest *go_i2cp.Destination) int {
@@ -854,34 +855,80 @@ func getSignatureTypeFromDestination(dest *go_i2cp.Destination) int {
 		return SignatureTypeEd25519
 	}
 
-	destSize := getDestinationSize(dest)
-	if destSize < 0 {
+	// Serialize the destination to get raw bytes
+	destBytes := serializeDestination(dest)
+	if destBytes == nil {
 		return SignatureTypeEd25519
 	}
 
-	return inferSignatureTypeFromSize(destSize)
+	// Parse the certificate from the destination bytes using go-i2p/common/certificate
+	sigType, ok := parseSignatureTypeFromBytes(destBytes)
+	if !ok {
+		return SignatureTypeEd25519
+	}
+
+	return sigType
 }
 
-// getDestinationSize serializes the destination and returns its size.
-// Returns -1 if serialization fails.
-func getDestinationSize(dest *go_i2cp.Destination) int {
+// serializeDestination converts a destination to raw bytes using WriteToMessage.
+// Returns nil if serialization fails or if dest is nil.
+func serializeDestination(dest *go_i2cp.Destination) []byte {
+	if dest == nil {
+		return nil
+	}
 	stream := go_i2cp.NewStream(make([]byte, 0, 512))
 	if err := dest.WriteToMessage(stream); err != nil {
-		return -1
+		return nil
 	}
-	return len(stream.Bytes())
+	return stream.Bytes()
 }
 
-// inferSignatureTypeFromSize uses size-based heuristics to determine signature type.
-// Ed25519 destinations are typically 387-391 bytes. DSA destinations are ~387 bytes.
-// Since go-i2cp only creates Ed25519 destinations (default since Java I2P 0.9.15),
-// we default to Ed25519. When receiving packets from Java I2P with other signature
-// types, the signature length is explicitly provided in the packet's option data.
-func inferSignatureTypeFromSize(destSize int) int {
-	// Standard size range for Ed25519 or DSA destinations
-	if destSize >= 385 && destSize <= 395 {
-		return SignatureTypeEd25519
+// parseSignatureTypeFromBytes extracts the signature type from serialized destination bytes.
+//
+// Destination byte layout (WriteToMessage format):
+//   - Bytes 0-255: ElGamal public encryption key (256 bytes)
+//   - Bytes 256-383: Signing public key, padded to 128 bytes
+//   - Bytes 384+: Certificate (type + length + data)
+//
+// Uses github.com/go-i2p/common/certificate.ReadCertificate for proper parsing.
+// Returns the signature type and true if successful, or (0, false) on error.
+func parseSignatureTypeFromBytes(data []byte) (int, bool) {
+	// Minimum destination size: 256 (ElGamal) + 128 (signing key) + 3 (min cert) = 387
+	minSize := DestinationPublicKeySize + DestinationSigningKeyPadding + certificate.CERT_MIN_SIZE
+	if len(data) < minSize {
+		return 0, false
 	}
-	// For non-standard sizes, default to Ed25519
-	return SignatureTypeEd25519
+
+	// Certificate starts after encryption key (256) and signing key (128)
+	certOffset := DestinationPublicKeySize + DestinationSigningKeyPadding
+	certBytes := data[certOffset:]
+
+	// Parse the certificate using the common library
+	cert, _, err := certificate.ReadCertificate(certBytes)
+	if err != nil || cert == nil {
+		return 0, false
+	}
+
+	// Get the certificate type
+	certType, err := cert.Type()
+	if err != nil {
+		return 0, false
+	}
+
+	// Handle NULL certificate (type 0) - legacy DSA_SHA1
+	if certType == certificate.CERT_NULL {
+		return SignatureTypeDSA_SHA1, true
+	}
+
+	// For KEY certificates (type 5), extract the signing key type
+	if certType == certificate.CERT_KEY {
+		sigType, err := certificate.GetSignatureTypeFromCertificate(*cert)
+		if err != nil {
+			return 0, false
+		}
+		return sigType, true
+	}
+
+	// Unknown certificate type - fall back to Ed25519
+	return SignatureTypeEd25519, true
 }
