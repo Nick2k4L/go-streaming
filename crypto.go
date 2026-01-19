@@ -1,6 +1,7 @@
 package streaming
 
 import (
+	"crypto/ed25519"
 	"encoding/binary"
 	"fmt"
 	"time"
@@ -174,6 +175,9 @@ func validateOfflineSignatureInputs(offsig *OfflineSig, dest *go_i2cp.Destinatio
 	if crypto == nil {
 		return fmt.Errorf("crypto is nil")
 	}
+	if len(offsig.TransientPublicKey) == 0 {
+		return fmt.Errorf("transient public key is empty")
+	}
 	return nil
 }
 
@@ -206,23 +210,6 @@ func buildOfflineSignatureData(offsig *OfflineSig) []byte {
 	toSign = append(toSign, offsig.TransientPublicKey...)
 
 	return toSign
-}
-
-// extractSigningPublicKey extracts the Ed25519 signing public key from a destination.
-// Returns the 32-byte signing key or an error if the destination is malformed.
-func extractSigningPublicKey(dest *go_i2cp.Destination) ([]byte, error) {
-	destStream := go_i2cp.NewStream(make([]byte, 0, 512))
-	if err := dest.WriteToMessage(destStream); err != nil {
-		return nil, fmt.Errorf("encode destination: %w", err)
-	}
-	destBytes := destStream.Bytes()
-
-	// For Ed25519 (signature type 7), signing key is 32 bytes at offset 256
-	if len(destBytes) < 256+32 {
-		return nil, fmt.Errorf("destination too short for Ed25519 key extraction")
-	}
-
-	return destBytes[256 : 256+32], nil
 }
 
 // validateDestSignatureFormat checks that the destination signature has valid format.
@@ -275,28 +262,30 @@ func VerifyOfflineSignature(offsig *OfflineSig, dest *go_i2cp.Destination, crypt
 	// Build the data that was signed by the destination
 	toSign := buildOfflineSignatureData(offsig)
 
-	// Extract signing public key from destination
-	signingPubKey, err := extractSigningPublicKey(dest)
-	if err != nil {
-		return err
-	}
-
 	// Validate the destination signature format
 	if err := validateDestSignatureFormat(offsig.DestSignature); err != nil {
 		return err
 	}
 
-	// TODO: Full cryptographic verification requires go-i2cp to provide
-	// a method to verify signatures with just a public key (not full keypair).
-	// For now, we validate the format and structure.
-	// When go-i2cp provides Ed25519PublicKey.Verify() or similar, we can do:
-	//   pubKey := crypto.Ed25519PublicKeyFromBytes(signingPubKey)
-	//   if err := pubKey.Verify(toSign, offsig.DestSignature); err != nil {
-	//       return fmt.Errorf("offline signature verification failed: %w", err)
-	//   }
+	// Use the destination's signing public key for verification
+	// The destination contains an Ed25519 signing keypair
+	signingKeyPair := dest.SigningPublicKey()
+	if signingKeyPair == nil {
+		return fmt.Errorf("destination has no signing public key")
+	}
 
-	_ = signingPubKey // Use the extracted key in future implementation
-	_ = toSign        // Data that should be verified
+	// Get the raw Ed25519 public key (32 bytes)
+	pubKey := signingKeyPair.PublicKey()
+	if len(pubKey) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid signing public key size: expected %d, got %d",
+			ed25519.PublicKeySize, len(pubKey))
+	}
+
+	// Verify the signature using the standard library ed25519
+	// The destination signed: Expires || TransientSigType || TransientPublicKey
+	if !ed25519.Verify(pubKey, toSign, offsig.DestSignature) {
+		return fmt.Errorf("offline signature verification failed: signature does not match")
+	}
 
 	return nil
 }

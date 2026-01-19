@@ -11,6 +11,41 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// createSignedOfflineSig creates a properly signed offline signature for testing.
+// It signs the data: Expires || TransientSigType || TransientPublicKey with the destination's signing key.
+func createSignedOfflineSig(t *testing.T, dest *go_i2cp.Destination, expires uint32, transientType uint16, transientKeyLen int) *OfflineSig {
+	t.Helper()
+
+	// Generate transient public key
+	transientKey := make([]byte, transientKeyLen)
+	_, err := rand.Read(transientKey)
+	require.NoError(t, err)
+
+	// Build the data to sign: Expires (4 bytes) + TransientSigType (2 bytes) + TransientPublicKey
+	toSign := make([]byte, 0, 6+len(transientKey))
+	var buf4 [4]byte
+	binary.BigEndian.PutUint32(buf4[:], expires)
+	toSign = append(toSign, buf4[:]...)
+	var buf2 [2]byte
+	binary.BigEndian.PutUint16(buf2[:], transientType)
+	toSign = append(toSign, buf2[:]...)
+	toSign = append(toSign, transientKey...)
+
+	// Sign with the destination's signing key
+	signingKeyPair, err := dest.SigningKeyPair()
+	require.NoError(t, err)
+
+	signature, err := signingKeyPair.Sign(toSign)
+	require.NoError(t, err)
+
+	return &OfflineSig{
+		Expires:            expires,
+		TransientSigType:   transientType,
+		TransientPublicKey: transientKey,
+		DestSignature:      signature,
+	}
+}
+
 // TestVerifyOfflineSignatureNilInputs tests error handling for nil inputs
 func TestVerifyOfflineSignatureNilInputs(t *testing.T) {
 	crypto := go_i2cp.NewCrypto()
@@ -72,24 +107,13 @@ func TestVerifyOfflineSignatureNotExpired(t *testing.T) {
 	dest, err := go_i2cp.NewDestination(crypto)
 	require.NoError(t, err)
 
-	// Create offline signature that expires in 1 hour
-	offsig := &OfflineSig{
-		Expires:            uint32(time.Now().Unix() + 3600),
-		TransientSigType:   SignatureTypeEd25519,
-		TransientPublicKey: make([]byte, 32),
-		DestSignature:      make([]byte, 64),
-	}
-	_, err = rand.Read(offsig.TransientPublicKey)
-	require.NoError(t, err)
-	_, err = rand.Read(offsig.DestSignature)
-	require.NoError(t, err)
+	// Create a properly signed offline signature that expires in 1 hour
+	expires := uint32(time.Now().Unix() + 3600)
+	offsig := createSignedOfflineSig(t, dest, expires, SignatureTypeEd25519, 32)
 
-	// Should not error on expiration (may error on signature verification)
+	// Should pass verification
 	err = VerifyOfflineSignature(offsig, dest, crypto)
-	// We expect either no error (if verification passes) or a verification error (not expiration)
-	if err != nil {
-		assert.NotContains(t, err.Error(), "expired")
-	}
+	assert.NoError(t, err, "valid signature should verify successfully")
 }
 
 // TestVerifyOfflineSignatureDataFormat tests the signed data format construction
@@ -100,37 +124,13 @@ func TestVerifyOfflineSignatureDataFormat(t *testing.T) {
 
 	expires := uint32(time.Now().Unix() + 3600)
 	transientType := uint16(SignatureTypeEd25519)
-	transientKey := make([]byte, 32)
-	_, err = rand.Read(transientKey)
-	require.NoError(t, err)
 
-	offsig := &OfflineSig{
-		Expires:            expires,
-		TransientSigType:   transientType,
-		TransientPublicKey: transientKey,
-		DestSignature:      make([]byte, 64),
-	}
-	_, err = rand.Read(offsig.DestSignature)
-	require.NoError(t, err)
+	// Create a properly signed offline signature
+	offsig := createSignedOfflineSig(t, dest, expires, transientType, 32)
 
-	// Verify the function constructs the data correctly
-	// Build expected data format
-	expectedData := make([]byte, 0, 6+len(transientKey))
-	var buf4 [4]byte
-	binary.BigEndian.PutUint32(buf4[:], expires)
-	expectedData = append(expectedData, buf4[:]...)
-	var buf2 [2]byte
-	binary.BigEndian.PutUint16(buf2[:], uint16(transientType))
-	expectedData = append(expectedData, buf2[:]...)
-	expectedData = append(expectedData, transientKey...)
-
-	// Call function (will fail on signature verification, but that's okay)
+	// Verify the function works with correctly formatted and signed data
 	err = VerifyOfflineSignature(offsig, dest, crypto)
-	// Current implementation validates format but doesn't do full cryptographic verification
-	// So this should succeed (returns nil) after format validation
-	assert.NoError(t, err, "format validation should pass")
-
-	_ = expectedData // Use the expected data variable
+	assert.NoError(t, err, "properly signed offline signature should verify successfully")
 }
 
 // TestVerifyOfflineSignatureInvalidDestSignatureLength tests invalid signature length
@@ -171,24 +171,13 @@ func TestVerifyOfflineSignatureMultipleTransientTypes(t *testing.T) {
 			dest, err := go_i2cp.NewDestination(crypto)
 			require.NoError(t, err)
 
-			transientKey := make([]byte, tt.transientKeyLen)
-			_, err = rand.Read(transientKey)
-			require.NoError(t, err)
+			// Create a properly signed offline signature with the given transient key type
+			expires := uint32(time.Now().Unix() + 3600)
+			offsig := createSignedOfflineSig(t, dest, expires, tt.transientType, tt.transientKeyLen)
 
-			offsig := &OfflineSig{
-				Expires:            uint32(time.Now().Unix() + 3600),
-				TransientSigType:   tt.transientType,
-				TransientPublicKey: transientKey,
-				DestSignature:      make([]byte, 64), // Ed25519 dest signature
-			}
-			_, err = rand.Read(offsig.DestSignature)
-			require.NoError(t, err)
-
-			// Call function - validates format and structure
-			// Current implementation doesn't do full cryptographic verification
+			// Verify the signature
 			err = VerifyOfflineSignature(offsig, dest, crypto)
-			// Should succeed after format validation
-			assert.NoError(t, err, "format validation should pass for %s", tt.name)
+			assert.NoError(t, err, "properly signed signature should verify for %s", tt.name)
 		})
 	}
 }
@@ -236,51 +225,28 @@ func TestVerifyOfflineSignatureBoundaryTimestamp(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("expires exactly now", func(t *testing.T) {
-		offsig := &OfflineSig{
-			Expires:            uint32(time.Now().Unix()),
-			TransientSigType:   SignatureTypeEd25519,
-			TransientPublicKey: make([]byte, 32),
-			DestSignature:      make([]byte, 64),
-		}
-		_, err = rand.Read(offsig.TransientPublicKey)
-		require.NoError(t, err)
-		_, err = rand.Read(offsig.DestSignature)
-		require.NoError(t, err)
+		// Create a properly signed offline signature
+		expires := uint32(time.Now().Unix())
+		offsig := createSignedOfflineSig(t, dest, expires, SignatureTypeEd25519, 32)
 
 		// This might pass or fail depending on exact timing, but shouldn't panic
 		_ = VerifyOfflineSignature(offsig, dest, crypto)
 	})
 
 	t.Run("expires 1 second in future", func(t *testing.T) {
-		offsig := &OfflineSig{
-			Expires:            uint32(time.Now().Unix() + 1),
-			TransientSigType:   SignatureTypeEd25519,
-			TransientPublicKey: make([]byte, 32),
-			DestSignature:      make([]byte, 64),
-		}
-		_, err = rand.Read(offsig.TransientPublicKey)
-		require.NoError(t, err)
-		_, err = rand.Read(offsig.DestSignature)
-		require.NoError(t, err)
+		// Create a properly signed offline signature
+		expires := uint32(time.Now().Unix() + 1)
+		offsig := createSignedOfflineSig(t, dest, expires, SignatureTypeEd25519, 32)
 
 		err = VerifyOfflineSignature(offsig, dest, crypto)
-		// Should not error on expiration
-		if err != nil {
-			assert.NotContains(t, err.Error(), "expired")
-		}
+		// Should pass since not expired
+		assert.NoError(t, err)
 	})
 
 	t.Run("expired 1 second ago", func(t *testing.T) {
-		offsig := &OfflineSig{
-			Expires:            uint32(time.Now().Unix() - 1),
-			TransientSigType:   SignatureTypeEd25519,
-			TransientPublicKey: make([]byte, 32),
-			DestSignature:      make([]byte, 64),
-		}
-		_, err = rand.Read(offsig.TransientPublicKey)
-		require.NoError(t, err)
-		_, err = rand.Read(offsig.DestSignature)
-		require.NoError(t, err)
+		// Create a properly signed offline signature (but expired)
+		expires := uint32(time.Now().Unix() - 1)
+		offsig := createSignedOfflineSig(t, dest, expires, SignatureTypeEd25519, 32)
 
 		err = VerifyOfflineSignature(offsig, dest, crypto)
 		assert.Error(t, err)
@@ -295,20 +261,79 @@ func TestVerifyOfflineSignatureMaxTimestamp(t *testing.T) {
 	require.NoError(t, err)
 
 	// Use max uint32 value (year 2106)
-	offsig := &OfflineSig{
-		Expires:            ^uint32(0), // Max uint32
-		TransientSigType:   SignatureTypeEd25519,
-		TransientPublicKey: make([]byte, 32),
-		DestSignature:      make([]byte, 64),
-	}
-	_, err = rand.Read(offsig.TransientPublicKey)
-	require.NoError(t, err)
-	_, err = rand.Read(offsig.DestSignature)
-	require.NoError(t, err)
+	expires := ^uint32(0) // Max uint32
+	offsig := createSignedOfflineSig(t, dest, expires, SignatureTypeEd25519, 32)
 
 	err = VerifyOfflineSignature(offsig, dest, crypto)
-	// Should not error on expiration (year 2106 is far future)
-	if err != nil {
-		assert.NotContains(t, err.Error(), "expired")
-	}
+	// Should pass since year 2106 is far future
+	assert.NoError(t, err)
+}
+
+// TestVerifyOfflineSignatureInvalidSignature tests that invalid cryptographic signatures are rejected
+func TestVerifyOfflineSignatureInvalidSignature(t *testing.T) {
+	crypto := go_i2cp.NewCrypto()
+	dest, err := go_i2cp.NewDestination(crypto)
+	require.NoError(t, err)
+
+	t.Run("random signature", func(t *testing.T) {
+		// Create an offline signature with a random (invalid) signature
+		transientKey := make([]byte, 32)
+		_, err = rand.Read(transientKey)
+		require.NoError(t, err)
+
+		randomSig := make([]byte, 64)
+		_, err = rand.Read(randomSig)
+		require.NoError(t, err)
+
+		offsig := &OfflineSig{
+			Expires:            uint32(time.Now().Unix() + 3600),
+			TransientSigType:   SignatureTypeEd25519,
+			TransientPublicKey: transientKey,
+			DestSignature:      randomSig,
+		}
+
+		err = VerifyOfflineSignature(offsig, dest, crypto)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "signature does not match")
+	})
+
+	t.Run("tampered signature", func(t *testing.T) {
+		// Create a valid signature then tamper with it
+		expires := uint32(time.Now().Unix() + 3600)
+		offsig := createSignedOfflineSig(t, dest, expires, SignatureTypeEd25519, 32)
+
+		// Tamper with the signature
+		offsig.DestSignature[0] ^= 0xFF
+
+		err = VerifyOfflineSignature(offsig, dest, crypto)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "signature does not match")
+	})
+
+	t.Run("tampered data", func(t *testing.T) {
+		// Create a valid signature then tamper with the data
+		expires := uint32(time.Now().Unix() + 3600)
+		offsig := createSignedOfflineSig(t, dest, expires, SignatureTypeEd25519, 32)
+
+		// Tamper with the expires field
+		offsig.Expires += 1
+
+		err = VerifyOfflineSignature(offsig, dest, crypto)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "signature does not match")
+	})
+
+	t.Run("wrong destination", func(t *testing.T) {
+		// Sign with one destination, verify with another
+		dest2, err := go_i2cp.NewDestination(crypto)
+		require.NoError(t, err)
+
+		expires := uint32(time.Now().Unix() + 3600)
+		offsig := createSignedOfflineSig(t, dest, expires, SignatureTypeEd25519, 32)
+
+		// Verify with wrong destination
+		err = VerifyOfflineSignature(offsig, dest2, crypto)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "signature does not match")
+	})
 }
