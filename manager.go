@@ -47,6 +47,10 @@ type StreamManager struct {
 	// Message status tracking for reliable delivery
 	msgTracker *messageStatusTracker
 
+	// TCB cache for RFC 2140 control block sharing
+	// Shares RTT, RTT variance, and window size between connections to same peer
+	tcbCache *tcbCache
+
 	// Packet processing
 	incomingPackets chan *incomingPacket
 	processorCtx    context.Context
@@ -123,6 +127,9 @@ func NewStreamManager(client *go_i2cp.Client) (*StreamManager, error) {
 
 	// Initialize message status tracker for delivery confirmation
 	sm.msgTracker = newMessageStatusTracker(sm)
+
+	// Initialize TCB cache for RFC 2140 control block sharing
+	sm.tcbCache = newTCBCache(DefaultTCBCacheConfig())
 
 	// Create I2CP session with callbacks
 	callbacks := go_i2cp.SessionCallbacks{
@@ -833,4 +840,37 @@ func (sm *StreamManager) Close() error {
 	sm.closeAllConnections()
 
 	return nil
+}
+
+// TCBCache returns the TCB cache instance for direct access.
+// The TCB cache implements RFC 2140 control block sharing, storing
+// RTT, RTT variance, and window size estimates per remote peer.
+func (sm *StreamManager) TCBCache() *tcbCache {
+	return sm.tcbCache
+}
+
+// GetTCBCacheConfig returns the current TCB cache configuration.
+func (sm *StreamManager) GetTCBCacheConfig() TCBCacheConfig {
+	return sm.tcbCache.GetConfig()
+}
+
+// SetTCBCacheConfig updates the TCB cache configuration.
+// Changes affect new cache entries and lookups immediately.
+func (sm *StreamManager) SetTCBCacheConfig(config TCBCacheConfig) {
+	sm.tcbCache.SetConfig(config)
+}
+
+// EnableTCBCache enables or disables TCB cache sharing.
+// When disabled, connections will not use cached RTT/window values.
+func (sm *StreamManager) EnableTCBCache(enabled bool) {
+	config := sm.tcbCache.GetConfig()
+	config.Enabled = enabled
+	sm.tcbCache.SetConfig(config)
+}
+
+// CleanupTCBCache removes expired entries from the TCB cache.
+// This can be called periodically to prevent memory growth.
+// Returns the number of entries removed.
+func (sm *StreamManager) CleanupTCBCache() int {
+	return sm.tcbCache.CleanupExpired()
 }

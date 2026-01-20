@@ -488,6 +488,18 @@ func createConnectionStruct(session *go_i2cp.Session, manager *StreamManager, de
 	conn := initializeStreamConn(session, manager, dest, localPort, remotePort, mtu,
 		isn, localStreamID, recvBuf, ctx, cancel)
 
+	// Apply TCB cache data if available (RFC 2140 control block sharing)
+	if manager != nil && manager.tcbCache != nil {
+		if rtt, rttVar, windowSize, found := manager.tcbCache.Get(dest); found {
+			applyTCBDataToConnection(conn, TCBData{
+				RTT:         rtt,
+				RTTVariance: rttVar,
+				WindowSize:  windowSize,
+				FromCache:   true,
+			})
+		}
+	}
+
 	log.Info().
 		Uint16("localPort", localPort).
 		Uint16("remotePort", remotePort).
@@ -1109,6 +1121,19 @@ func (l *StreamListener) initConnectionState(synPkt *Packet, remotePort uint16, 
 	}
 	conn.recvCond = sync.NewCond(&conn.mu)
 	conn.sendCond = sync.NewCond(&conn.mu)
+
+	// Apply TCB cache data if available (RFC 2140 control block sharing)
+	if l.manager != nil && l.manager.tcbCache != nil {
+		if rtt, rttVar, windowSize, found := l.manager.tcbCache.Get(peerDest); found {
+			applyTCBDataToConnection(conn, TCBData{
+				RTT:         rtt,
+				RTTVariance: rttVar,
+				WindowSize:  windowSize,
+				FromCache:   true,
+			})
+		}
+	}
+
 	return conn
 }
 
@@ -3202,6 +3227,15 @@ func (s *StreamConn) sendCloseIfEstablished() {
 // cancels the receive loop, marks as closed, and wakes blocked goroutines.
 // Must be called with s.mu held.
 func (s *StreamConn) cleanupConnectionLocked() {
+	// Save TCB data before cleanup (RFC 2140 control block sharing)
+	// This allows subsequent connections to same peer to benefit from learned RTT/window
+	if s.manager != nil && s.manager.tcbCache != nil && s.dest != nil {
+		// Only cache if we have meaningful RTT data (not just defaults)
+		if s.srtt > 0 || s.rttVariance > 0 {
+			s.manager.tcbCache.Put(s.dest, s.srtt, s.rttVariance, s.cwnd)
+		}
+	}
+
 	if s.manager != nil {
 		s.manager.UnregisterConnection(s.localPort, s.remotePort)
 		// Decrement active stream count for connection limiting
