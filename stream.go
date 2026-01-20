@@ -262,13 +262,15 @@ type StreamConn struct {
 // StreamListener listens for and accepts incoming streaming connections.
 // Minimal implementation for MVP.
 type StreamListener struct {
-	manager    *StreamManager // Manager for packet routing
-	session    *go_i2cp.Session
-	localPort  uint16
-	acceptChan chan *StreamConn // Buffered channel for incoming connections
-	localMTU   uint16           // Our advertised MTU
-	mu         sync.Mutex
-	closed     bool
+	manager      *StreamManager // Manager for packet routing
+	session      *go_i2cp.Session
+	localPort    uint16
+	acceptChan   chan *StreamConn   // Buffered channel for incoming connections
+	localMTU     uint16             // Our advertised MTU
+	limiter      *connectionLimiter // Connection rate limiter
+	accessFilter *accessFilter      // Access list filter
+	mu           sync.Mutex
+	closed       bool
 }
 
 // MTU constants per I2P streaming specification
@@ -894,11 +896,13 @@ func ListenWithManager(manager *StreamManager, localPort uint16, mtu int) (*Stre
 	}
 
 	listener := &StreamListener{
-		manager:    manager,
-		session:    manager.Session(),
-		localPort:  localPort,
-		acceptChan: make(chan *StreamConn, 10),
-		localMTU:   uint16(mtu),
+		manager:      manager,
+		session:      manager.Session(),
+		localPort:    localPort,
+		acceptChan:   make(chan *StreamConn, 10),
+		localMTU:     uint16(mtu),
+		limiter:      manager.ConnectionLimiter(),
+		accessFilter: manager.AccessFilter(),
 	}
 
 	// Register with manager for packet routing
@@ -1132,6 +1136,16 @@ func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, re
 		Uint16("localPort", l.localPort).
 		Msg("received SYN")
 
+	// Check access list before anything else
+	if err := l.checkAccessFilter(remoteDest, synPkt); err != nil {
+		return err
+	}
+
+	// Check connection limits before processing
+	if err := l.checkConnectionLimits(remoteDest, synPkt); err != nil {
+		return err
+	}
+
 	if err := l.validateIncomingSYN(synPkt, remoteDest); err != nil {
 		return err
 	}
@@ -1143,6 +1157,67 @@ func (l *StreamListener) handleIncomingSYN(synPkt *Packet, remotePort uint16, re
 	}
 
 	return l.finalizeIncomingConnection(conn, remotePort)
+}
+
+// checkAccessFilter verifies that the remote destination is allowed to connect.
+// If access is denied, the connection is rejected with a RESET.
+func (l *StreamListener) checkAccessFilter(remoteDest *go_i2cp.Destination, synPkt *Packet) error {
+	if l.accessFilter == nil {
+		return nil // No access filter configured, allow all connections
+	}
+
+	// Check if destination is allowed (this also handles logging)
+	if err := l.accessFilter.CheckAndLog(remoteDest); err != nil {
+		// Send RESET to the blocked peer
+		if l.manager != nil {
+			l.manager.sendResetPacket(remoteDest, synPkt.RecvStreamID, l.localPort, 0)
+		}
+
+		return fmt.Errorf("connection rejected by access filter: %w", err)
+	}
+
+	return nil
+}
+
+// checkConnectionLimits verifies that accepting this connection won't exceed configured limits.
+// If limits are exceeded, the appropriate action (reset, drop, http) is taken.
+func (l *StreamListener) checkConnectionLimits(remoteDest *go_i2cp.Destination, synPkt *Packet) error {
+	if l.limiter == nil {
+		return nil // No limiter configured, allow all connections
+	}
+
+	if err := l.limiter.CheckAndRecordConnection(remoteDest); err != nil {
+		config := l.limiter.GetConfig()
+
+		// Log the rejection if not disabled
+		logLimitExceeded(config, remoteDest, err.Error())
+
+		// Take the configured action
+		l.handleLimitExceeded(config, remoteDest, synPkt)
+
+		return fmt.Errorf("connection rejected: %w", err)
+	}
+
+	return nil
+}
+
+// handleLimitExceeded performs the configured action when connection limits are exceeded.
+func (l *StreamListener) handleLimitExceeded(config *ConnectionLimitsConfig, remoteDest *go_i2cp.Destination, synPkt *Packet) {
+	switch config.LimitAction {
+	case LimitActionReset:
+		// Send a RESET packet to the peer
+		if l.manager != nil {
+			l.manager.sendResetPacket(remoteDest, synPkt.RecvStreamID, l.localPort, 0)
+		}
+	case LimitActionDrop:
+		// Silently drop - do nothing
+	case LimitActionHTTP:
+		// Send HTTP 429 response - this would require sending data before closing
+		// For now, just send RESET (HTTP 429 is rarely used in I2P context)
+		if l.manager != nil {
+			l.manager.sendResetPacket(remoteDest, synPkt.RecvStreamID, l.localPort, 0)
+		}
+	}
 }
 
 // validateIncomingSYN performs all validation checks on an incoming SYN packet.
@@ -3101,6 +3176,10 @@ func (s *StreamConn) sendCloseIfEstablished() {
 func (s *StreamConn) cleanupConnectionLocked() {
 	if s.manager != nil {
 		s.manager.UnregisterConnection(s.localPort, s.remotePort)
+		// Decrement active stream count for connection limiting
+		if s.manager.limiter != nil {
+			s.manager.limiter.ConnectionClosed()
+		}
 	}
 
 	// Stop persist timer if running

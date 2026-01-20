@@ -38,6 +38,12 @@ type StreamManager struct {
 	// Ping/pong handling
 	pingMgr *pingManager
 
+	// Connection rate limiting
+	limiter *connectionLimiter
+
+	// Access list filtering
+	accessFilter *accessFilter
+
 	// Packet processing
 	incomingPackets chan *incomingPacket
 	processorCtx    context.Context
@@ -105,6 +111,12 @@ func NewStreamManager(client *go_i2cp.Client) (*StreamManager, error) {
 
 	// Initialize ping manager with default config
 	sm.pingMgr = newPingManager(sm, DefaultPingConfig())
+
+	// Initialize connection limiter with default config (unlimited)
+	sm.limiter = newConnectionLimiter(DefaultConnectionLimitsConfig())
+
+	// Initialize access filter with default config (disabled)
+	sm.accessFilter = newAccessFilter(DefaultAccessListConfig())
 
 	// Create I2CP session with callbacks
 	callbacks := go_i2cp.SessionCallbacks{
@@ -546,6 +558,85 @@ func (sm *StreamManager) GetPingConfig() *PingConfig {
 		AnswerPings: sm.pingMgr.config.AnswerPings,
 		PingTimeout: sm.pingMgr.config.PingTimeout,
 	}
+}
+
+// SetConnectionLimits updates the connection rate limiting configuration.
+// Use this to protect against connection flooding attacks.
+//
+// Example:
+//
+//	manager.SetConnectionLimits(&streaming.ConnectionLimitsConfig{
+//	    MaxConcurrentStreams: 100,
+//	    MaxConnsPerMinute:    10,
+//	    LimitAction:          streaming.LimitActionReset,
+//	})
+func (sm *StreamManager) SetConnectionLimits(config *ConnectionLimitsConfig) {
+	sm.limiter.SetConfig(config)
+}
+
+// GetConnectionLimits returns a copy of the current connection limits configuration.
+func (sm *StreamManager) GetConnectionLimits() *ConnectionLimitsConfig {
+	return sm.limiter.GetConfig()
+}
+
+// ActiveStreams returns the current number of active streams.
+func (sm *StreamManager) ActiveStreams() int {
+	return sm.limiter.ActiveStreams()
+}
+
+// ConnectionLimiter returns the connection limiter for this manager.
+// This is used internally by listeners to check limits.
+func (sm *StreamManager) ConnectionLimiter() *connectionLimiter {
+	return sm.limiter
+}
+
+// SetAccessFilter configures the access list filtering for this manager.
+// Pass nil to use default (disabled) configuration.
+func (sm *StreamManager) SetAccessFilter(config *AccessListConfig) {
+	if config == nil {
+		config = DefaultAccessListConfig()
+	}
+	sm.accessFilter = newAccessFilter(config)
+}
+
+// GetAccessFilter returns a copy of the current access filter configuration.
+func (sm *StreamManager) GetAccessFilter() *AccessListConfig {
+	return sm.accessFilter.GetConfig()
+}
+
+// AccessFilter returns the access filter for this manager.
+// This is used internally by listeners to check access permissions.
+func (sm *StreamManager) AccessFilter() *accessFilter {
+	return sm.accessFilter
+}
+
+// AddToAccessList adds a destination hash to the access list.
+// The hash should be the base64 representation of the destination hash.
+func (sm *StreamManager) AddToAccessList(hash string) {
+	sm.accessFilter.AddHash(hash)
+}
+
+// RemoveFromAccessList removes a destination hash from the access list.
+func (sm *StreamManager) RemoveFromAccessList(hash string) {
+	sm.accessFilter.RemoveHash(hash)
+}
+
+// SetAccessListEnabled enables or disables access list filtering.
+func (sm *StreamManager) SetAccessListEnabled(enabled bool, mode AccessListMode) {
+	config := sm.accessFilter.GetConfig()
+	if enabled {
+		config.Mode = mode
+	} else {
+		config.Mode = AccessListModeDisabled
+	}
+	sm.accessFilter.SetConfig(config)
+}
+
+// SetAccessListMode sets the access list mode (whitelist or blacklist).
+func (sm *StreamManager) SetAccessListMode(mode AccessListMode) {
+	config := sm.accessFilter.GetConfig()
+	config.Mode = mode
+	sm.accessFilter.SetConfig(config)
 }
 
 // handleSynPacket handles a SYN packet by routing to a listener or sending RESET.
