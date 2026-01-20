@@ -62,8 +62,8 @@ func TestRTOConstants(t *testing.T) {
 		assert.Equal(t, 100*time.Millisecond, MinRTO, "MinRTO should be 100ms per I2P streaming spec")
 	})
 
-	t.Run("MaxRTO is 60s per spec", func(t *testing.T) {
-		assert.Equal(t, 60*time.Second, MaxRTO, "MaxRTO should be 60 seconds per I2P streaming spec")
+	t.Run("MaxRTO is 45s per spec", func(t *testing.T) {
+		assert.Equal(t, 45*time.Second, MaxRTO, "MaxRTO should be 45 seconds per I2P streaming spec MAX_RESEND_DELAY")
 	})
 }
 

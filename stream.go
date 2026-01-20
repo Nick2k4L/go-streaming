@@ -318,16 +318,16 @@ const (
 	MinRTO = 100 * time.Millisecond
 
 	// MaxRTO is the maximum retransmission timeout.
-	// Per I2P streaming spec: MAX_RESEND_DELAY = 60 seconds.
-	MaxRTO = 60 * time.Second
+	// Per I2P streaming spec: MAX_RESEND_DELAY = 45 seconds.
+	MaxRTO = 45 * time.Second
 
 	// FastRetransmitThreshold is the number of NACKs required before fast retransmit.
 	// Per I2P streaming spec: "Two NACKs of a packet is a request for a 'fast retransmit'"
 	FastRetransmitThreshold = 2
 
 	// MaxRetransmissions is the maximum number of times a packet can be retransmitted.
-	// After this many retries, the packet is considered undeliverable.
-	MaxRetransmissions = 10
+	// Per I2P streaming spec: i2p.streaming.maxResends default = 8.
+	MaxRetransmissions = 8
 
 	// PersistProbeInterval is the interval between probe packets when choked.
 	// Per I2P streaming spec: "The choked endpoint should start a 'persist timer'
@@ -1911,14 +1911,14 @@ func (s *StreamConn) findTimedOutPacketsLocked() []uint32 {
 	return timedOutSeqs
 }
 
-// applyExponentialBackoffLocked doubles the RTO per RFC 6298 (capped at 60s).
+// applyExponentialBackoffLocked doubles the RTO per RFC 6298 (capped at MaxRTO).
 // Logs the backoff with count of timed-out packets.
 // Caller must hold s.mu.
 func (s *StreamConn) applyExponentialBackoffLocked(timedOutCount int) {
 	oldRTO := s.rto
 	s.rto = s.rto * 2
-	if s.rto > 60*time.Second {
-		s.rto = 60 * time.Second
+	if s.rto > MaxRTO {
+		s.rto = MaxRTO
 	}
 
 	log.Debug().
@@ -1929,14 +1929,14 @@ func (s *StreamConn) applyExponentialBackoffLocked(timedOutCount int) {
 }
 
 // retransmitTimedOutPacketsLocked retransmits all timed-out packets.
-// Returns error if any packet exceeds max retries (10 attempts).
+// Returns error if any packet exceeds max retries (MaxRetransmissions).
 // Caller must hold s.mu.
 func (s *StreamConn) retransmitTimedOutPacketsLocked(timedOutSeqs []uint32) error {
 	for _, seq := range timedOutSeqs {
 		info := s.sentPackets[seq]
 
 		// Check max retries BEFORE incrementing (retransmitPacketLocked will increment)
-		if info.retryCount >= 10 {
+		if info.retryCount >= MaxRetransmissions {
 			log.Error().
 				Uint32("seq", seq).
 				Int("retries", info.retryCount).
@@ -1964,8 +1964,8 @@ func (s *StreamConn) retransmitTimedOutPacketsLocked(timedOutSeqs []uint32) erro
 }
 
 // checkRetransmissions scans sent packets for timeouts and retransmits them.
-// Implements exponential backoff per RFC 6298: double RTO on timeout (max 60s).
-// Returns error if max retries (10) exceeded for any packet.
+// Implements exponential backoff per RFC 6298: double RTO on timeout (max 45s per spec).
+// Returns error if max retries (8 per spec) exceeded for any packet.
 func (s *StreamConn) checkRetransmissions() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2310,7 +2310,7 @@ func (s *StreamConn) updateRTTEstimate(rtt time.Duration) {
 }
 
 // calculateRTO calculates and sets the retransmission timeout.
-// Uses MinRTO (100ms) and MaxRTO (60s) bounds per I2P streaming spec.
+// Uses MinRTO (100ms) and MaxRTO (45s) bounds per I2P streaming spec.
 // Must be called with s.mu held.
 func (s *StreamConn) calculateRTO() {
 	s.rto = s.srtt + 4*s.rttVariance

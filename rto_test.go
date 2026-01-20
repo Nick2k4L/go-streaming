@@ -163,7 +163,7 @@ func TestRTOMinimumBound(t *testing.T) {
 	require.Equal(t, MinRTO, rto, "RTO should be at least 100ms per I2P streaming spec")
 }
 
-// TestRTOMaximumBound verifies RTO maximum of 60 seconds
+// TestRTOMaximumBound verifies RTO maximum of 45 seconds per I2P streaming spec.
 func TestRTOMaximumBound(t *testing.T) {
 	s := &StreamConn{
 		state:      StateEstablished,
@@ -195,7 +195,7 @@ func TestRTOMaximumBound(t *testing.T) {
 	s.mu.Unlock()
 
 	require.NoError(t, err)
-	require.Equal(t, 60*time.Second, rto, "RTO should be capped at 60 seconds")
+	require.Equal(t, 45*time.Second, rto, "RTO should be capped at 45 seconds (MAX_RESEND_DELAY)")
 }
 
 // TestRTOVarianceCalculation verifies RTTVAR responds to RTT changes

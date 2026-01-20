@@ -156,8 +156,8 @@ func TestResendDelayBounds(t *testing.T) {
 	maxDelay := s.getResendDelaySeconds()
 	assert.LessOrEqual(t, maxDelay, uint8(255),
 		"Maximum RTO should not exceed 255")
-	assert.Equal(t, uint8(60), maxDelay,
-		"MaxRTO (60s) should give ResendDelay of 60")
+	assert.Equal(t, uint8(45), maxDelay,
+		"MaxRTO (45s) should give ResendDelay of 45")
 }
 
 // TestResendDelayWithTypicalRTOProgression verifies ResendDelay
@@ -183,9 +183,9 @@ func TestResendDelayWithTypicalRTOProgression(t *testing.T) {
 	s.rto = 16 * time.Second
 	assert.Equal(t, uint8(16), s.getResendDelaySeconds())
 
-	// Capped at MaxRTO
+	// Capped at MaxRTO (45s per spec)
 	s.rto = MaxRTO
-	assert.Equal(t, uint8(60), s.getResendDelaySeconds())
+	assert.Equal(t, uint8(45), s.getResendDelaySeconds())
 }
 
 // BenchmarkGetResendDelaySeconds benchmarks the RTO to ResendDelay conversion.

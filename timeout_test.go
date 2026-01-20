@@ -121,7 +121,7 @@ func TestExponentialBackoff(t *testing.T) {
 	assert.Equal(t, 4*time.Second, s.rto, "RTO should double again after second timeout")
 }
 
-// TestMaxRTOBound verifies RTO is capped at 60 seconds
+// TestMaxRTOBound verifies RTO is capped at 45 seconds per I2P streaming spec.
 func TestMaxRTOBound(t *testing.T) {
 	s := newTestStreamConnForTimeout()
 	defer s.Close()
@@ -136,13 +136,14 @@ func TestMaxRTOBound(t *testing.T) {
 		retryCount: 0,
 	}
 
-	// Check retransmissions - RTO should be capped at 60s
+	// Check retransmissions - RTO should be capped at 45s (MAX_RESEND_DELAY per spec)
 	err := s.checkRetransmissions()
 	require.NoError(t, err)
-	assert.Equal(t, 60*time.Second, s.rto, "RTO should be capped at 60 seconds")
+	assert.Equal(t, 45*time.Second, s.rto, "RTO should be capped at 45 seconds per I2P spec")
 }
 
-// TestMaxRetriesExceeded verifies connection closes after max retries
+// TestMaxRetriesExceeded verifies connection closes after max retries.
+// Per I2P streaming spec, i2p.streaming.maxResends defaults to 8.
 func TestMaxRetriesExceeded(t *testing.T) {
 	s := newTestStreamConnForTimeout()
 	defer s.Close()
@@ -150,11 +151,11 @@ func TestMaxRetriesExceeded(t *testing.T) {
 	// Set a short RTO
 	s.rto = 10 * time.Millisecond
 
-	// Add a packet that has already been retried 10 times
+	// Add a packet that has already been retried 8 times (MaxRetransmissions per spec)
 	s.sentPackets[5] = &sentPacket{
 		data:       []byte{1, 2, 3, 4},
 		sentTime:   time.Now().Add(-20 * time.Millisecond),
-		retryCount: 10, // Already at max
+		retryCount: 8, // Already at max (i2p.streaming.maxResends default)
 	}
 
 	// Check retransmissions - should return error
