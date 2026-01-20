@@ -200,7 +200,7 @@ type StreamConn struct {
 	rttVariance time.Duration // RTT variance per RFC 6298
 
 	// Choking mechanism per I2P streaming spec
-	// optDelay field: 0-60000ms = advisory delay, >60000 = choked
+	// optDelay field: 0-MaxDelayNormal ms = advisory delay, >= MinDelayChoke = choked
 	optDelay        uint16        // Optional delay field from last packet
 	choked          bool          // Are we being choked by remote peer (sender-side)?
 	chokedUntil     time.Time     // When to resume sending after being choked
@@ -333,6 +333,19 @@ const (
 	// to control the probing" to compensate for possible lost unchoke packets.
 	// Using 5 seconds as a reasonable interval (less than typical chokedUntil but often enough).
 	PersistProbeInterval = 5 * time.Second
+
+	// MinDelayChoke is the minimum OptionalDelay value that indicates choking.
+	// Per I2P streaming spec: "Optional delay values greater than 60000 indicate choking."
+	// Java I2P reference: Packet.java MIN_DELAY_CHOKE = 60001
+	MinDelayChoke uint16 = 60001
+
+	// SendDelayChoke is the OptionalDelay value to send when signaling choke.
+	// Java I2P reference: Packet.java SEND_DELAY_CHOKE = 61000
+	SendDelayChoke uint16 = 61000
+
+	// MaxDelayNormal is the maximum OptionalDelay value for normal (non-choke) delay requests.
+	// Values 0-60000 indicate an advisory delay in milliseconds.
+	MaxDelayNormal uint16 = 60000
 )
 
 // Dial initiates a connection to the specified I2P destination.
@@ -2561,7 +2574,7 @@ func (s *StreamConn) handleOptionalDelayLocked(pkt *Packet) {
 		return
 	}
 
-	if pkt.OptionalDelay > 60000 {
+	if pkt.OptionalDelay >= MinDelayChoke {
 		wasChoked := s.choked
 		s.choked = true
 		s.chokedUntil = time.Now().Add(time.Second)
@@ -3046,7 +3059,7 @@ func (s *StreamConn) sendAckLocked() error {
 }
 
 // sendChokeSignalLocked sends a choke signal to the remote peer indicating our receive buffer is full.
-// Per I2P streaming spec, OptionalDelay > 60000 indicates a choked state.
+// Per I2P streaming spec, OptionalDelay >= MinDelayChoke (60001) indicates a choked state.
 // This tells the sender to pause transmission until we send an unchoke signal.
 // Must be called with s.mu held.
 func (s *StreamConn) sendChokeSignalLocked() error {
@@ -3056,7 +3069,7 @@ func (s *StreamConn) sendChokeSignalLocked() error {
 		SequenceNum:   0, // seq=0 without SYN = plain ACK per spec
 		AckThrough:    s.recvSeq - 1,
 		Flags:         FlagDelayRequested, // Only delay flag needed for choke
-		OptionalDelay: 61000,              // >60000 = choked per I2P streaming spec
+		OptionalDelay: SendDelayChoke,     // >= MinDelayChoke = choked per I2P streaming spec
 	}
 
 	// Include NACKs if we have any gaps (even when choked, request missing packets)

@@ -5,8 +5,33 @@ import (
 	"testing"
 
 	"github.com/armon/circbuf"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestChokeThresholdConstants verifies that choke threshold constants match
+// the Java I2P reference implementation values from Packet.java.
+func TestChokeThresholdConstants(t *testing.T) {
+	// These values must match Java I2P Packet.java for interoperability:
+	// public static final int MIN_DELAY_CHOKE = 60001;
+	// public static final int SEND_DELAY_CHOKE = 61000;
+
+	assert.Equal(t, uint16(60001), MinDelayChoke,
+		"MinDelayChoke must be 60001 per Java I2P Packet.java MIN_DELAY_CHOKE")
+
+	assert.Equal(t, uint16(61000), SendDelayChoke,
+		"SendDelayChoke must be 61000 per Java I2P Packet.java SEND_DELAY_CHOKE")
+
+	assert.Equal(t, uint16(60000), MaxDelayNormal,
+		"MaxDelayNormal must be 60000 (maximum non-choke delay value)")
+
+	// Verify the invariants
+	assert.Greater(t, MinDelayChoke, MaxDelayNormal,
+		"MinDelayChoke must be greater than MaxDelayNormal")
+
+	assert.GreaterOrEqual(t, SendDelayChoke, MinDelayChoke,
+		"SendDelayChoke must be >= MinDelayChoke to trigger choke detection")
+}
 
 // newTestStreamConnForChoke creates a minimal StreamConn for testing choke signals.
 // Uses real I2CP session to ensure packets can be sent.
