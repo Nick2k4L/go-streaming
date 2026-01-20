@@ -253,6 +253,11 @@ type StreamConn struct {
 	lastActivity      time.Time     // Last time data was sent or received
 	inactivityTimeout time.Duration // Inactivity timeout duration (0 = disabled)
 
+	// Profile configuration per I2P streaming spec
+	// Per spec: i2p.streaming.profile option (1=bulk, 2=interactive)
+	profile       StreamProfile // Our profile (set on outgoing connections)
+	remoteProfile StreamProfile // Peer's profile (extracted from incoming SYN)
+
 	// Connection state and synchronization
 	mu     sync.Mutex // Protects all fields above
 	closed bool
@@ -500,6 +505,13 @@ func createConnectionStruct(session *go_i2cp.Session, manager *StreamManager, de
 		}
 	}
 
+	// Apply profile configuration from manager
+	if manager != nil {
+		conn.profile = manager.GetProfile()
+	} else {
+		conn.profile = ProfileBulk // Default per spec
+	}
+
 	log.Info().
 		Uint16("localPort", localPort).
 		Uint16("remotePort", remotePort).
@@ -607,13 +619,19 @@ func (s *StreamConn) generateReplayPreventionNACKs() ([]uint32, error) {
 
 // buildSYNPacket constructs the SYN packet with all required fields.
 // Per I2P streaming spec, initial SYN has FlagNoACK set because ackThrough is not valid yet.
+// If profile is set to ProfileInteractive, the PROFILE_INTERACTIVE flag (bit 8) is included.
 func (s *StreamConn) buildSYNPacket(nacks []uint32) *Packet {
+	flags := FlagSYN | FlagNoACK | FlagMaxPacketSizeIncluded | FlagSignatureIncluded | FlagFromIncluded
+
+	// Add PROFILE_INTERACTIVE flag if configured per I2P spec
+	flags |= profileToFlag(s.profile)
+
 	return &Packet{
 		SendStreamID:    0,               // Always 0 in initial SYN per spec
 		RecvStreamID:    s.localStreamID, // Our stream ID for peer to use
 		SequenceNum:     s.sendSeq,
 		AckThrough:      0, // No ACK yet - FlagNoACK tells peer to ignore this
-		Flags:           FlagSYN | FlagNoACK | FlagMaxPacketSizeIncluded | FlagSignatureIncluded | FlagFromIncluded,
+		Flags:           flags,
 		MaxPacketSize:   s.localMTU,
 		NACKs:           nacks,
 		FromDestination: s.session.Destination(),
@@ -723,6 +741,7 @@ func (s *StreamConn) processSynAck(pkt *Packet) error {
 	s.remoteStreamID = pkt.SendStreamID
 	s.ackThrough = pkt.AckThrough
 	s.extractRemoteMTUFromSynAck(pkt)
+	s.extractRemoteProfileFromSynAck(pkt)
 	s.logSynAckProcessed(pkt)
 	return nil
 }
@@ -773,6 +792,18 @@ func (s *StreamConn) extractRemoteMTUFromSynAck(pkt *Packet) {
 		log.Warn().
 			Uint16("localMTU", s.localMTU).Uint16("negotiatedMTU", s.getNegotiatedMTULocked()).
 			Msg("SYN-ACK missing MTU flag/value, using default")
+	}
+}
+
+// extractRemoteProfileFromSynAck extracts the remote peer's profile hint from the SYN-ACK.
+// Per I2P spec, FlagProfileInteractive (bit 8) indicates the peer prefers interactive mode.
+func (s *StreamConn) extractRemoteProfileFromSynAck(pkt *Packet) {
+	if pkt.Flags&FlagProfileInteractive != 0 {
+		s.remoteProfile = ProfileInteractive
+		log.Debug().Msg("remote profile: interactive")
+	} else {
+		s.remoteProfile = ProfileBulk
+		log.Debug().Msg("remote profile: bulk")
 	}
 }
 
@@ -1122,6 +1153,15 @@ func (l *StreamListener) initConnectionState(synPkt *Packet, remotePort uint16, 
 	conn.recvCond = sync.NewCond(&conn.mu)
 	conn.sendCond = sync.NewCond(&conn.mu)
 
+	// Set profile from manager and extract remote profile from SYN
+	if l.manager != nil {
+		conn.profile = l.manager.GetStreamProfile()
+	}
+	conn.remoteProfile = ProfileBulk // default
+	if synPkt.Flags&FlagProfileInteractive != 0 {
+		conn.remoteProfile = ProfileInteractive
+	}
+
 	// Apply TCB cache data if available (RFC 2140 control block sharing)
 	if l.manager != nil && l.manager.tcbCache != nil {
 		if rtt, rttVar, windowSize, found := l.manager.tcbCache.Get(peerDest); found {
@@ -1306,12 +1346,17 @@ func (s *StreamConn) sendSynAck() error {
 // Per I2P streaming spec, a SYN-ACK is identified by FlagSYN set and SendStreamID > 0.
 // There is no explicit ACK flag - ackThrough is always valid.
 func (s *StreamConn) buildSynAckPacket() *Packet {
+	flags := FlagSYN | FlagMaxPacketSizeIncluded | FlagSignatureIncluded | FlagFromIncluded
+	// Set profile flag if interactive
+	if s.profile == ProfileInteractive {
+		flags |= FlagProfileInteractive
+	}
 	return &Packet{
 		SendStreamID:    s.localStreamID,
 		RecvStreamID:    s.remoteStreamID,
 		SequenceNum:     s.sendSeq,
 		AckThrough:      s.recvSeq - 1,
-		Flags:           FlagSYN | FlagMaxPacketSizeIncluded | FlagSignatureIncluded | FlagFromIncluded,
+		Flags:           flags,
 		MaxPacketSize:   s.localMTU,
 		FromDestination: s.session.Destination(),
 	}
@@ -3382,6 +3427,22 @@ func (s *StreamConn) RemoteAddr() net.Addr {
 		dest: s.dest,
 		port: s.remotePort,
 	}
+}
+
+// Profile returns the local stream profile hint.
+// Returns ProfileBulk (1) for bulk transfer or ProfileInteractive (2) for interactive.
+func (s *StreamConn) Profile() StreamProfile {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.profile
+}
+
+// RemoteProfile returns the remote peer's stream profile hint as received in SYN.
+// Returns ProfileBulk (1) for bulk transfer or ProfileInteractive (2) for interactive.
+func (s *StreamConn) RemoteProfile() StreamProfile {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.remoteProfile
 }
 
 // SetDeadline sets the read and write deadlines.

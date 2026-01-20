@@ -51,6 +51,10 @@ type StreamManager struct {
 	// Shares RTT, RTT variance, and window size between connections to same peer
 	tcbCache *tcbCache
 
+	// Profile configuration for traffic pattern hints
+	// Per I2P spec: i2p.streaming.profile option
+	profileConfig ProfileConfig
+
 	// Packet processing
 	incomingPackets chan *incomingPacket
 	processorCtx    context.Context
@@ -130,6 +134,9 @@ func NewStreamManager(client *go_i2cp.Client) (*StreamManager, error) {
 
 	// Initialize TCB cache for RFC 2140 control block sharing
 	sm.tcbCache = newTCBCache(DefaultTCBCacheConfig())
+
+	// Initialize profile config with default (bulk)
+	sm.profileConfig = DefaultProfileConfig()
 
 	// Create I2CP session with callbacks
 	callbacks := go_i2cp.SessionCallbacks{
@@ -445,6 +452,23 @@ func (sm *StreamManager) GetMessageStats() MessageStats {
 // This is used internally by connections to track outgoing messages.
 func (sm *StreamManager) MessageTracker() *messageStatusTracker {
 	return sm.msgTracker
+}
+
+// GetStreamProfile returns the configured stream profile hint.
+// Returns ProfileBulk (1) for bulk transfer or ProfileInteractive (2) for interactive.
+func (sm *StreamManager) GetStreamProfile() StreamProfile {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.profileConfig.Profile
+}
+
+// SetStreamProfile sets the stream profile hint for new connections.
+// ProfileBulk (1) is optimized for large data transfers.
+// ProfileInteractive (2) is optimized for low-latency exchanges.
+func (sm *StreamManager) SetStreamProfile(profile StreamProfile) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.profileConfig.Profile = profile
 }
 
 // processPackets runs in a goroutine to dispatch incoming packets.
@@ -873,4 +897,36 @@ func (sm *StreamManager) EnableTCBCache(enabled bool) {
 // Returns the number of entries removed.
 func (sm *StreamManager) CleanupTCBCache() int {
 	return sm.tcbCache.CleanupExpired()
+}
+
+// GetProfileConfig returns the current streaming profile configuration.
+// Per I2P spec: i2p.streaming.profile option.
+func (sm *StreamManager) GetProfileConfig() ProfileConfig {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.profileConfig
+}
+
+// SetProfileConfig updates the streaming profile configuration.
+// This affects new connections only; existing connections retain their profile.
+// Per I2P spec: i2p.streaming.profile option.
+func (sm *StreamManager) SetProfileConfig(config ProfileConfig) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.profileConfig = config
+}
+
+// SetProfile is a convenience method to set the streaming profile.
+// Valid values are ProfileBulk (1) and ProfileInteractive (2).
+func (sm *StreamManager) SetProfile(profile StreamProfile) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.profileConfig.Profile = profile
+}
+
+// GetProfile returns the current streaming profile.
+func (sm *StreamManager) GetProfile() StreamProfile {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.profileConfig.Profile
 }
