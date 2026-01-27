@@ -7,7 +7,7 @@ toolchain go1.24.12
 require (
 	github.com/armon/circbuf v0.0.0-20190214190532-5111143e8da2
 	github.com/go-i2p/common v0.1.0
-	github.com/go-i2p/go-i2cp v0.1.1-rc1
+	github.com/go-i2p/go-i2cp v0.1.1-rc2
 	github.com/go-i2p/logger v0.1.0
 	github.com/stretchr/testify v1.11.1
 )
