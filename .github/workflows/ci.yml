@@ -33,7 +33,7 @@ jobs:
         with:
           backend: ${{ matrix.backend }}
 
-      - name: Run go-i2cp test suite
+      - name: Run go-streaming test suite
         run: go test -v -timeout 20m -count=1 ./...
 
       - uses: go-i2p/i2p-provider/.github/actions/i2p-router-stop@main
