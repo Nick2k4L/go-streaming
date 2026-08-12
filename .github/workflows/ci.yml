@@ -10,7 +10,7 @@ on:
 # uses github.com/go-i2p/i2p-provider
 jobs:
   test:
-    name: go-i2cp test suite (${{ matrix.backend }})
+    name: go-streaming test suite (${{ matrix.backend }})
     strategy:
       fail-fast: false
       matrix:
