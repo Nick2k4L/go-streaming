@@ -3,7 +3,7 @@ name: CI (Prebuilt I2P Router Workflow)
 on:
   push:
     branches:
-      - master
+      - main
   pull_request:
   workflow_dispatch:
 
@@ -17,7 +17,6 @@ jobs:
         backend:
           - java
           - i2pd
-          - go-i2p
     runs-on: ubuntu-latest
     container:
       image: ubuntu:24.04
