@@ -71,7 +71,7 @@ func runStreamRoundTripSuite(t *testing.T) {
 	// on slow routers. Lenient on timeout: some routers may not push
 	// CreateLeaseSet2 to the client, and the dial handshake is the real gate.
 	for _, m := range []*StreamManager{serverManager, clientManager} {
-		lsCtx, lsCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		lsCtx, lsCancel := context.WithTimeout(context.Background(), 60*time.Second)
 		if err := m.WaitForLeaseSet(lsCtx); err != nil {
 			t.Logf("LeaseSet readiness not signaled within 30s, proceeding anyway: %v", err)
 		}
