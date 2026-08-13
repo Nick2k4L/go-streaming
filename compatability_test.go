@@ -87,7 +87,7 @@ func runStreamRoundTripSuite(t *testing.T) {
 	require.NotNil(t, serverDest, "server destination should be available")
 	t.Logf("server listening on %s:%d", serverDest.Base32()[:16], port)
 
-	const opTimeout = 120 * time.Second
+	const opTimeout = 60 * time.Second
 
 	// Echo server: reflect everything until the client disconnects.
 	serverErr := make(chan error, 1)
