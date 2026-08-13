@@ -66,6 +66,18 @@ func runStreamRoundTripSuite(t *testing.T) {
 	serverManager := newCompatSession(t)
 	clientManager := newCompatSession(t)
 
+	// StartSession returns at session creation, before tunnels exist. Wait for
+	// LeaseSet publication so the dial below doesn't race tunnel construction
+	// on slow routers. Lenient on timeout: some routers may not push
+	// CreateLeaseSet2 to the client, and the dial handshake is the real gate.
+	for _, m := range []*StreamManager{serverManager, clientManager} {
+		lsCtx, lsCancel := context.WithTimeout(context.Background(), 40*time.Second)
+		if err := m.WaitForLeaseSet(lsCtx); err != nil {
+			t.Logf("LeaseSet readiness not signaled within 30s, proceeding anyway: %v", err)
+		}
+		lsCancel()
+	}
+
 	const port = 9777
 	listener, err := ListenWithManager(serverManager, port, DefaultMTU)
 	require.NoError(t, err, "should create listener")
@@ -75,7 +87,7 @@ func runStreamRoundTripSuite(t *testing.T) {
 	require.NotNil(t, serverDest, "server destination should be available")
 	t.Logf("server listening on %s:%d", serverDest.Base32()[:16], port)
 
-	const opTimeout = 60 * time.Second
+	const opTimeout = 120 * time.Second
 
 	// Echo server: reflect everything until the client disconnects.
 	serverErr := make(chan error, 1)

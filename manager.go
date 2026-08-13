@@ -323,6 +323,20 @@ func (sm *StreamManager) Destination() *go_i2cp.Destination {
 	return sm.session.Destination()
 }
 
+// WaitForLeaseSet blocks until the router publishes this session's LeaseSet
+// (signaled by the OnLeaseSet2 callback) or ctx expires. A published LeaseSet
+// means inbound tunnels exist and remote peers can reach this destination, so
+// listeners should wait for it before expecting inbound connections. Note that
+// StartSession returns at session creation, well before this point.
+func (sm *StreamManager) WaitForLeaseSet(ctx context.Context) error {
+	select {
+	case <-sm.leaseSetReady:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for LeaseSet publication: %w", ctx.Err())
+	}
+}
+
 // RegisterListener registers a listener to receive incoming connections.
 // When SYN packets arrive for this port, they'll be routed to the listener.
 func (sm *StreamManager) RegisterListener(port uint16, listener *StreamListener) {
